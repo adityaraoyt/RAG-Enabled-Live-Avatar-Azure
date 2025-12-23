@@ -1,0 +1,10 @@
+python-dotenv
+tqdm
+
+azure-search-documents==11.6.0
+
+openai>=1.0.0
+
+pymupdf
+python-docx
+python-pptx
