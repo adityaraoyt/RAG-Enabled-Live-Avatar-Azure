@@ -80,15 +80,7 @@ trainerStreamRouter.post("/respond/stream", async (req, res) => {
       },
     ];
 
-    send("meta", {
-      conversationId,
-      sources: passages.map((p, i) => ({
-        ref: `#${i + 1}`,
-        doc_id: p.doc_id,
-        path: p.path,
-        page_num: p.page_num,
-      })),
-    });
+    send("meta", {conversationId});
 
     // Stream tokens
     const stream = await chatCompletionStream(messages);

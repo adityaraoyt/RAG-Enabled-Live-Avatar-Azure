@@ -41,15 +41,7 @@ trainerRouter.post("/respond", async (req, res) => {
 
     const speech = await chatCompletion({ system: sys, user: usr });
 
-    res.json({
-      speech,
-      sources: passages.map((p, i) => ({
-        ref: `#${i + 1}`,
-        doc_id: p.doc_id,
-        path: p.path,
-        page_num: p.page_num,
-      })),
-    });
+    res.json({speech});
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
   }

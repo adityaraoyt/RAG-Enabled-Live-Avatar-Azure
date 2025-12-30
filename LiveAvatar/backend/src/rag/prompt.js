@@ -21,5 +21,5 @@ export function userPrompt(question, passages) {
 Context:
 ${context}
 
-Answer in plain English. Cite sources using [#1], [#2] at the end of sentences where you used context.`;
+Answer in plain English. `;
 }
