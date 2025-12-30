@@ -204,18 +204,3 @@ http://localhost:5173
 - Conversation context preserved (in-memory)
 - Clean chat UI MVP
 
----
-
-## Planned Next Steps
-
-- Persistent conversation storage
-- Avatar + voice synthesis integration
-- Authentication (Azure AD / Entra ID)
-- Production deployment
-- Improved RAG quality
-
----
-
-## License
-
-Internal / MVP use only

@@ -1,7 +1,7 @@
 export function systemPrompt() {
   return `You are an enterprise training instructor.
-Use ONLY the provided context.
-If the context doesn't contain the answer, say you don't know and ask a clarifying question.
+Your responses MUST BE GROUNDED to the training material.
+If the material doesn't contain the answer, ask one clarifying question.
 Keep answers short and actionable.`;
 }
 
@@ -21,5 +21,5 @@ export function userPrompt(question, passages) {
 Context:
 ${context}
 
-Answer in plain English. `;
+Answer in plain English.`;
 }

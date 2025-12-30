@@ -1,6 +1,6 @@
 import express from "express";
 import { z } from "zod";
-import { embedText, chatCompletionStream } from "./aoai.js";
+import { embedText, chatCompletion, chatCompletionStream } from "./aoai.js";
 import { vectorSearch } from "./azureSearch.js";
 import { systemPrompt, userPrompt } from "./prompt.js";
 
@@ -17,6 +17,50 @@ function pushMsg(conversationId, msg) {
   h.push(msg);
   conversations.set(conversationId, h);
 }
+
+function buildContextQuery(history, question, maxTurns = 6) {
+  const tail = history.slice(-maxTurns);
+  const lines = tail
+    .filter(m => m.role === "user" || m.role === "assistant")
+    .map(m => `${m.role.toUpperCase()}: ${m.content}`);
+  lines.push(`USER: ${question}`);
+  return lines.join("\n");
+}
+
+async function rewriteStandaloneQuery(history, question) {
+  const tail = history
+    .slice(-8)
+    .map(m => `${m.role.toUpperCase()}: ${m.content}`)
+    .join("\n");
+
+  const system = `Rewrite the user's message into one or more standalone search queries.
+- Resolve pronouns ("it", "that", "step 2")
+- Preserve ALL intents if the message contains multiple parts
+Return JSON only: {"queries":["...","..."]}`;
+
+  const user = `Conversation:\n${tail}\n\nUser message:\n${question}`;
+
+  try {
+    const out = await chatCompletion({ system, user });
+    const parsed = JSON.parse(out);
+    if (Array.isArray(parsed?.queries) && parsed.queries.length) return parsed.queries.slice(0, 3);
+  } catch (_) {}
+  // fallback: just one query
+  return [question];
+}
+
+function dedupePassages(passages) {
+  const seen = new Set();
+  const out = [];
+  for (const p of passages) {
+    const key = p.content_hash || `${p.path || ""}::${(p.content || "").slice(0, 200)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out;
+}
+
 
 export const trainerStreamRouter = express.Router();
 
@@ -59,12 +103,30 @@ trainerStreamRouter.post("/respond/stream", async (req, res) => {
     pushMsg(conversationId, { role: "user", content: question });
 
     // Retrieve
-    const embedding = await embedText(question);
+    const history = getHistory(conversationId, 20);
     const filter = buildFilter({ course_id, module_id });
-    const passages = await vectorSearch({ embedding, k: topK, filter });
+
+    // Build multiple retrieval queries (NO guessing)
+    const contextQuery = buildContextQuery(history, question, 6);
+    const rewriteQueries = await rewriteStandaloneQuery(history, question);
+
+    // Always include the raw question + context query + up to 3 rewrite queries
+    const retrievalQueries = [question, contextQuery, ...rewriteQueries].slice(0, 5);
+
+    // Embed + search each query, then fuse
+    const results = [];
+    for (const q of retrievalQueries) {
+      const emb = await embedText(q);
+      const hits = await vectorSearch({ embedding: emb, k: topK, filter });
+      results.push(...hits);
+    }
+
+    // Merge + dedupe + keep a reasonable cap
+    const passages = dedupePassages(results).slice(0, topK * 3);
+
 
     // Build prompt with history
-    const history = getHistory(conversationId, 20);
+    
     const sys = systemPrompt() + "\nKeep it spoken and training-friendly.";
 
     // IMPORTANT: exclude the latest user msg in history because we add it explicitly
@@ -80,7 +142,15 @@ trainerStreamRouter.post("/respond/stream", async (req, res) => {
       },
     ];
 
-    send("meta", {conversationId});
+    send("meta", {
+      conversationId,
+      sources: passages.map((p, i) => ({
+        ref: `#${i + 1}`,
+        doc_id: p.doc_id,
+        path: p.path,
+        page_num: p.page_num,
+      })),
+    });
 
     // Stream tokens
     const stream = await chatCompletionStream(messages);
