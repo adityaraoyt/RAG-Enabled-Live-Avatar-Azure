@@ -4,6 +4,34 @@ import { embedText, chatCompletion, chatCompletionStream } from "./aoai.js";
 import { vectorSearch } from "./azureSearch.js";
 import { systemPrompt, userPrompt } from "./prompt.js";
 
+async function resolveQuestion({ chatCompletion, history, question }) {
+  // Keep transcript short so it doesn't drift
+  const transcript = history
+    .slice(-12)
+    .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+    .join("\n");
+
+  const system =
+    "You rewrite the user's last message into a standalone, unambiguous question.\n" +
+    "- Resolve references like 'this', 'that', 'it', 'they' using the conversation.\n" +
+    "- Do NOT change the topic.\n" +
+    "- Do NOT introduce new topics (e.g., harassment, HR) unless the conversation explicitly mentions them.\n" +
+    "- If the user asks multiple things, keep them.\n" +
+    "Return ONLY the rewritten question text.";
+
+  const user =
+    `Conversation:\n${transcript}\n\n` +
+    `User last message:\n${question}\n\n` +
+    `Rewritten standalone question:`;
+
+  const rewritten = await chatCompletion({ system, user });
+  const out = (rewritten || "").trim();
+
+  // Safety: if rewrite is empty, fall back to original
+  return out.length >= 3 ? out : question;
+}
+
+
 // OPTIONAL: in-memory conversation store (simple MVP)
 const conversations = new Map(); // conversationId -> [{role, content}]
 
@@ -81,10 +109,11 @@ function buildFilter({ course_id, module_id }) {
 }
 
 trainerStreamRouter.post("/respond/stream", async (req, res) => {
+
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  let { conversationId, question, topK = 8, course_id, module_id } = parsed.data;
+  let { conversationId, question, topK = 6, course_id, module_id } = parsed.data;
   if (!conversationId) conversationId = crypto.randomUUID?.() ?? String(Date.now());
 
   // SSE headers
@@ -98,6 +127,42 @@ trainerStreamRouter.post("/respond/stream", async (req, res) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
+  // Build retrieval query using recent history + current question
+  const history = getHistory(conversationId, 8); // small window
+  const lastUserTurns = history
+    .filter(m => m.role === "user")
+    .slice(-3)
+    .map(m => m.content)
+    .join("\n");
+
+const retrievalQuery = lastUserTurns
+  ? `Conversation so far:\n${lastUserTurns}\n\nCurrent question:\n${question}`
+  : question;
+
+// Use retrievalQuery for embedding (not just question)
+const embedding = await embedText(retrievalQuery);
+
+
+  // Build a compact transcript for rewriting (keep it short)
+  const transcript = history
+    .slice(-12)
+    .map(m => `${m.role.toUpperCase()}: ${m.content}`)
+    .join("\n");
+
+  const rewriteSystem =
+    "You rewrite the user's last message into a standalone search query. " +
+    "Include any missing specifics implied by the conversation. " +
+    "If the last message contains multiple questions/topics, keep them all. " +
+    "Return ONLY the rewritten query text.";
+
+  const rewrittenQuery = await chatCompletion({
+    system: rewriteSystem,
+    user: `Conversation so far:\n${transcript}\n\nUser's last message:\n${question}\n\nRewritten standalone query:`,
+  });
+  
+  const resolvedQuestion = await resolveQuestion({ chatCompletion, history, question });
+
+  
   try {
     // Store user message
     pushMsg(conversationId, { role: "user", content: question });
@@ -137,7 +202,7 @@ trainerStreamRouter.post("/respond/stream", async (req, res) => {
       ...historyWithoutLatest,
       {
         role: "user",
-        content: userPrompt(question, passages) +
+        content: userPrompt(resolvedQuestion, passages) +
           "\n\nReturn ONLY the spoken answer. No markdown.",
       },
     ];
