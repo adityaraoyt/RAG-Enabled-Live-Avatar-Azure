@@ -8,6 +8,7 @@ Grounding rules:
 - Use conversation history to determine WHAT the user means (intent, references, follow-ups).
 - If retrieved passages conflict with what you said earlier, correct yourself.
 - If the retrieved passages do not support a claim, do not invent details.
+- If a follow-up reference (e.g., "this", "that", "it") cannot be reliably resolved using the conversation state and retrieved passages, ask exactly ONE clarifying question instead of guessing.
 
 Answer style:
 - Sound like a helpful instructor.
@@ -20,7 +21,25 @@ Safety / scope:
 - If you truly lack enough info to answer, ask exactly ONE clarifying question.`;
 }
 
-export function userPrompt(question, passages, conversationSummary = "") {
+function buildConversationState(history = [], maxMessages = 8, maxLen = 300) {
+  if (!Array.isArray(history) || history.length === 0) return "(none)";
+  const last = history.slice(-maxMessages);
+  return last
+    .map((m, i) => {
+      const role = m.role || "user";
+      let content = String(m.content || "").trim().replace(/\s+/g, " ");
+      if (content.length > maxLen) content = content.slice(0, maxLen) + "...";
+      return `${role.toUpperCase()} ${i + 1}: ${content}`;
+    })
+    .join("\n");
+}
+
+export function userPrompt(
+  question,
+  passages,
+  conversationSummary = "",
+  conversationHistory = []
+) {
   const context = (passages || [])
     .map((p, i) => {
       const loc =
@@ -31,18 +50,24 @@ export function userPrompt(question, passages, conversationSummary = "") {
     })
     .join("\n\n---\n\n");
 
+  const conversationState = buildConversationState(conversationHistory);
+
   return `User question:
 ${question}
 
 Conversation summary (may be empty):
 ${conversationSummary}
 
+Conversation state (last messages, short):
+${conversationState}
+
 Retrieved training passages:
 ${context || "(none)"}
 
 Instructions:
-- First, interpret what the user is referring to using the conversation summary/history.
-- Then answer using the retrieved passages for specifics.
+- First, interpret what the user is referring to using the conversation summary/history and the conversation state.
+- Anchor retrieval on the user's latest question and use the retrieved passages for specifics.
 - If passages seem unrelated to the conversation intent, say so briefly and ask ONE clarifying question.
+- If a follow-up reference (e.g., "this", "that", "it") cannot be resolved from the conversation state and retrieved passages, ask exactly ONE clarifying question rather than guessing.
 - Return ONLY the answer text.`;
 }
