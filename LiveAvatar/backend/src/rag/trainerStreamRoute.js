@@ -232,7 +232,133 @@ const embedding = await embedText(retrievalQuery);
     send("done", { ok: true });
     res.end();
   } catch (e) {
+    const isContentFilter =
+      e?.code === "content_filter" ||
+      e?.error?.code === "content_filter" ||
+      (e?.message && e.message.includes("content management policy")) ||
+      e?.name === "BadRequestError";
+
+    if (isContentFilter) {
+      const fallback = "I'm unable to provide an answer for that request due to content restrictions. Please try rephrasing.";
+      // stream fallback as token(s)
+      send("token", { token: fallback });
+      pushMsg(conversationId, { role: "assistant", content: fallback });
+      send("done", { ok: true, filtered: true });
+      res.end();
+      return;
+    }
+
     send("error", { error: String(e?.message || e) });
     res.end();
   }
 });
+
+trainerStreamRouter.post("/respond", async (req, res) => {
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  let { conversationId, question, topK = 6, course_id, module_id } = parsed.data;
+  if (!conversationId) conversationId = crypto.randomUUID?.() ?? String(Date.now());
+
+  try {
+    const history = getHistory(conversationId, 20);
+    const filter = buildFilter({ course_id, module_id });
+
+    // Build multiple retrieval queries (NO guessing)
+    const contextQuery = buildContextQuery(history, question, 6);
+    const rewriteQueries = await rewriteStandaloneQuery(history, question);
+
+    // Always include the raw question + context query + up to 3 rewrite queries
+    const retrievalQueries = [question, contextQuery, ...rewriteQueries].slice(0, 5);
+
+    // Embed + search each query, then fuse
+    const results = [];
+    for (const q of retrievalQueries) {
+      const emb = await embedText(q);
+      const hits = await vectorSearch({ embedding: emb, k: topK, filter });
+      results.push(...hits);
+    }
+
+    // Merge + dedupe + keep a reasonable cap
+    const passages = dedupePassages(results).slice(0, topK * 3);
+
+    // Build prompt with history
+    const sys = systemPrompt() + "\nKeep it spoken and training-friendly.";
+
+    // IMPORTANT: exclude the latest user msg in history because we add it explicitly
+    const historyWithoutLatest = history.slice(0, -1);
+
+    const messages = [
+      { role: "system", content: sys },
+      ...historyWithoutLatest,
+      {
+        role: "user",
+        content: userPrompt(question, passages) +
+          "\n\nReturn ONLY the spoken answer. No markdown.",
+      },
+    ];
+
+    // Get chat completion
+    try {
+      const completion = await chatCompletion({
+        system: sys,
+        user: `Conversation so far:\n${historyWithoutLatest.map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n")}\n\nUser's last message:\n${question}\n\n`,
+        history: historyWithoutLatest,
+        top_k: topK,
+        temperature: 0.7,
+        max_tokens: 150,
+      });
+
+      if (completion?.filtered) {
+        // Non-streaming route: send JSON
+        return res.json({
+          success: true,
+          answer: completion.text,
+          filtered: true
+        });
+      }
+
+      // Normal behavior: use completion.text (or stream it back as before)
+      const answer = completion.text;
+
+      // Store user and assistant messages in the conversation history
+      pushMsg(conversationId, { role: "assistant", content: answer });
+
+      // Send response
+      return res.json({
+        success: true,
+        answer,
+        sources: passages.map((p, i) => ({
+          ref: `#${i + 1}`,
+          doc_id: p.doc_id,
+          path: p.path,
+          page_num: p.page_num,
+        })),
+      });
+    } catch (err) {
+      // fallback for other unexpected errors (optional)
+      console.error('Error resolving question:', err);
+      return res.status(500).json({
+        success: false,
+        error: 'Internal server error'
+      });
+    }
+  } catch (err) {
+    // fallback for other unexpected errors (optional)
+    console.error('Error resolving question:', err);
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+function isContentFilterError(err) {
+  return (
+    err?.code === "content_filter" ||
+    err?.error?.code === "content_filter" ||
+    (err?.message && err.message.includes("content management policy")) ||
+    err?.name === "BadRequestError"
+  );
+}
+
