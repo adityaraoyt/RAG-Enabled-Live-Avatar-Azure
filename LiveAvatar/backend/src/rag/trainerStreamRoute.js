@@ -1,8 +1,9 @@
 import express from "express";
 import { z } from "zod";
-import { embedText, chatCompletion, chatCompletionStream } from "./aoai.js";
+import { embedText, chatCompletion, chatCompletionStream, normalizeCompletion } from "./aoai.js";
 import { vectorSearch } from "./azureSearch.js";
 import { systemPrompt, userPrompt } from "./prompt.js";
+
 
 async function resolveQuestion({ chatCompletion, history, question }) {
   // Keep transcript short so it doesn't drift
@@ -25,11 +26,13 @@ async function resolveQuestion({ chatCompletion, history, question }) {
     `Rewritten standalone question:`;
 
   const rewritten = await chatCompletion({ system, user });
-  const out = (rewritten || "").trim();
+  const { text } = normalizeCompletion(rewritten);
+  const out = (text || "").trim();
 
   // Safety: if rewrite is empty, fall back to original
   return out.length >= 3 ? out : question;
 }
+
 
 
 // OPTIONAL: in-memory conversation store (simple MVP)
@@ -68,14 +71,19 @@ Return JSON only: {"queries":["...","..."]}`;
 
   const user = `Conversation:\n${tail}\n\nUser message:\n${question}`;
 
-  try {
-    const out = await chatCompletion({ system, user });
-    const parsed = JSON.parse(out);
-    if (Array.isArray(parsed?.queries) && parsed.queries.length) return parsed.queries.slice(0, 3);
-  } catch (_) {}
-  // fallback: just one query
-  return [question];
+  
+const out = await chatCompletion({ system, user });
+const { text } = normalizeCompletion(out);
+
+try {
+  const parsed = JSON.parse(text);
+  if (Array.isArray(parsed?.queries) && parsed.queries.length) {
+    return parsed.queries.slice(0, 3);
+  }
+} catch (_) {}
+return [question];
 }
+
 
 function dedupePassages(passages) {
   const seen = new Set();
@@ -155,10 +163,16 @@ const embedding = await embedText(retrievalQuery);
     "If the last message contains multiple questions/topics, keep them all. " +
     "Return ONLY the rewritten query text.";
 
-  const rewrittenQuery = await chatCompletion({
-    system: rewriteSystem,
-    user: `Conversation so far:\n${transcript}\n\nUser's last message:\n${question}\n\nRewritten standalone query:`,
-  });
+
+
+const r = await chatCompletion({
+  system: rewriteSystem,
+  user: `Conversation so far:\n${transcript}\n\nUser's last message:\n${question}\n\nRewritten standalone query:`,
+});
+const { text: rewrittenQueryText, filtered: rewriteFiltered } = normalizeCompletion(r);
+const rewrittenQuery = rewriteFiltered ? question : (rewrittenQueryText || question);
+
+
   
   const resolvedQuestion = await resolveQuestion({ chatCompletion, history, question });
 
@@ -231,26 +245,20 @@ const embedding = await embedText(retrievalQuery);
 
     send("done", { ok: true });
     res.end();
-  } catch (e) {
-    const isContentFilter =
-      e?.code === "content_filter" ||
-      e?.error?.code === "content_filter" ||
-      (e?.message && e.message.includes("content management policy")) ||
-      e?.name === "BadRequestError";
-
-    if (isContentFilter) {
-      const fallback = "I'm unable to provide an answer for that request due to content restrictions. Please try rephrasing.";
-      // stream fallback as token(s)
-      send("token", { token: fallback });
-      pushMsg(conversationId, { role: "assistant", content: fallback });
-      send("done", { ok: true, filtered: true });
-      res.end();
-      return;
-    }
-
-    send("error", { error: String(e?.message || e) });
-    res.end();
+  
+} catch (e) {
+  if (e.status === 400) {
+    const fallback = "I'm unable to help with that request.";
+    send("token", { token: fallback });
+    pushMsg(conversationId, { role: "assistant", content: fallback });
+    send("done", { ok: true, filtered: true });
+    return res.end();
   }
+
+  send("error", { error: String(e.message || e) });
+  return res.end();
+}
+
 });
 
 trainerStreamRouter.post("/respond", async (req, res) => {
@@ -300,26 +308,22 @@ trainerStreamRouter.post("/respond", async (req, res) => {
 
     // Get chat completion
     try {
-      const completion = await chatCompletion({
-        system: sys,
-        user: `Conversation so far:\n${historyWithoutLatest.map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n")}\n\nUser's last message:\n${question}\n\n`,
-        history: historyWithoutLatest,
-        top_k: topK,
-        temperature: 0.7,
-        max_tokens: 150,
-      });
+      
+const completion = await chatCompletion({
+  system: sys,
+  user: `Conversation so far:\n${historyWithoutLatest.map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n")}\n\nUser's last message:\n${question}\n\n`,
+});
 
-      if (completion?.filtered) {
-        // Non-streaming route: send JSON
-        return res.json({
-          success: true,
-          answer: completion.text,
-          filtered: true
-        });
-      }
+const { text: answer, filtered } = normalizeCompletion(completion);
 
-      // Normal behavior: use completion.text (or stream it back as before)
-      const answer = completion.text;
+if (filtered) {
+  return res.json({
+    success: true,
+    answer,
+    filtered: true,
+  });
+}
+
 
       // Store user and assistant messages in the conversation history
       pushMsg(conversationId, { role: "assistant", content: answer });

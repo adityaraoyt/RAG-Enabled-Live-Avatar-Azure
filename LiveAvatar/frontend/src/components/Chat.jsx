@@ -1,21 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { streamTrainerResponse } from "../api";
+import { useStt } from "../hooks/useStt.js";
 
 function newConversationId() {
   return (crypto?.randomUUID?.() ?? `conv_${Date.now()}_${Math.random()}`)
     .toString();
 }
 
+
 export default function Chat() {
   const [conversationId, setConversationId] = useState(() => newConversationId());
   const [messages, setMessages] = useState([
-    {
-      id: "sys",
-      role: "assistant",
-      content: "Hey — ask me a training question and I’ll answer using your knowledge base.",
-    },
+    { id: "sys", role: "assistant", content: "Hey — ask me a training question and I’ll answer using your knowledge base." },
   ]);
-
   const [input, setInput] = useState("");
   const [topK, setTopK] = useState(8);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -29,19 +26,15 @@ export default function Chat() {
   }, [messages, isStreaming]);
 
   const startNewChat = () => {
-    // stop current stream if any
     abortRef.current?.abort?.();
     abortRef.current = null;
     setIsStreaming(false);
 
+    // stop mic if it’s on
+    stt.disconnect();
+
     setConversationId(newConversationId());
-    setMessages([
-      {
-        id: "sys",
-        role: "assistant",
-        content: "New chat started. Ask your next question.",
-      },
-    ]);
+    setMessages([{ id: "sys", role: "assistant", content: "New chat started. Ask your next question." }]);
   };
 
   const stop = () => {
@@ -50,9 +43,10 @@ export default function Chat() {
     setIsStreaming(false);
   };
 
-  const send = async () => {
-    const question = input.trim();
-    if (!question) return;
+  // --- NEW: generic sender used by text input and STT final ---
+  const sendQuestion = async (question) => {
+    const q = question.trim();
+    if (!q) return;
 
     setInput("");
 
@@ -61,38 +55,29 @@ export default function Chat() {
 
     setMessages((prev) => [
       ...prev,
-      { id: userMsgId, role: "user", content: question },
+      { id: userMsgId, role: "user", content: q },
       { id: assistantMsgId, role: "assistant", content: "" },
     ]);
 
     setIsStreaming(true);
-
     const controller = new AbortController();
     abortRef.current = controller;
 
     try {
       await streamTrainerResponse({
         conversationId,
-        question,
+        question: q,
         topK,
         signal: controller.signal,
-        onMeta: (_meta) => {
-          // You can store meta.sources if you want a "show sources" drawer later
-        },
+        onMeta: (_meta) => {},
         onToken: (token) => {
           setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantMsgId ? { ...m, content: m.content + token } : m
-            )
+            prev.map((m) => (m.id === assistantMsgId ? { ...m, content: m.content + token } : m))
           );
         },
-        onDone: () => {
-          setIsStreaming(false);
-          abortRef.current = null;
-        },
+        onDone: () => { setIsStreaming(false); abortRef.current = null; },
         onError: (payload) => {
-          setIsStreaming(false);
-          abortRef.current = null;
+          setIsStreaming(false); abortRef.current = null;
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantMsgId
@@ -103,17 +88,27 @@ export default function Chat() {
         },
       });
     } catch (e) {
-      setIsStreaming(false);
-      abortRef.current = null;
+      setIsStreaming(false); abortRef.current = null;
       setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantMsgId
-            ? { ...m, content: `[Error] ${String(e?.message || e)}` }
-            : m
-        )
+        prev.map((m) => (m.id === assistantMsgId ? { ...m, content: `[Error] ${String(e?.message || e)}` } : m))
       );
     }
   };
+
+  const send = async () => sendQuestion(input);
+
+  // --- NEW: wire up the STT hook ---
+  const stt = useStt({
+    wsUrl: "ws://127.0.0.1:5050/ws/stt", // use wss:// if your frontend runs under https://
+    conversationId,
+    // we’re keeping your UI unchanged; no live caption rendering
+    onPartial: () => {},
+    onFinal: (text) => {
+      // only send if assistant isn’t already streaming a previous answer
+      if (text && !isStreaming) sendQuestion(text);
+    },
+    onError: (err) => console.warn("STT error:", err),
+  });
 
   const onKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -121,6 +116,7 @@ export default function Chat() {
       if (canSend) send();
     }
   };
+
 
   return (
     <div style={styles.page}>
@@ -154,9 +150,11 @@ export default function Chat() {
             <button onClick={stop} style={{ ...styles.btn, ...styles.btnDanger }}>
               Stop
             </button>
+            
           )}
         </div>
       </div>
+      
 
       <div style={styles.chat}>
         {messages.map((m) => (
@@ -193,9 +191,19 @@ export default function Chat() {
           placeholder="Ask a question… (Enter to send, Shift+Enter for newline)"
           disabled={isStreaming}
         />
+        
+ <button
+          onClick={stt.toggle}
+          style={{ ...styles.sendBtn, ...(stt.isMicOn ? styles.micOn : styles.micOff) }}
+          title={stt.isMicOn ? "Turn mic off" : "Turn mic on"}
+        >
+          {stt.isMicOn ? "🎙️ Mic On" : "🎙️ Mic Off"}
+        </button>
+
         <button onClick={send} style={styles.sendBtn} disabled={!canSend}>
           Send
         </button>
+
       </div>
     </div>
   );
