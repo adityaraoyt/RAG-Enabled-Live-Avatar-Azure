@@ -15,7 +15,7 @@ async function resolveQuestion({ chatCompletion, history, question }) {
     "You rewrite the user's last message into a standalone, unambiguous question.\n" +
     "- Resolve references like 'this', 'that', 'it', 'they' using the conversation.\n" +
     "- Do NOT change the topic.\n" +
-    "- Do NOT introduce new topics (e.g., harassment, HR) unless the conversation explicitly mentions them.\n" +
+    "- Do NOT introduce new topics\n" +
     "- If the user asks multiple things, keep them.\n" +
     "Return ONLY the rewritten question text.";
 
