@@ -1,57 +1,84 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+
+import { useEffect, useRef, useState } from "react";
 import { streamTrainerResponse } from "../api";
-import { useStt } from "../hooks/useStt.js";
+import { useAzureStt } from "../hooks/useAzureStt.js";
+import { useAzureAvatar } from "../hooks/useAzureAvatar.js";
 
 function newConversationId() {
-  return (crypto?.randomUUID?.() ?? `conv_${Date.now()}_${Math.random()}`)
-    .toString();
+  return (crypto?.randomUUID?.() ?? `conv_${Date.now()}_${Math.random()}`).toString();
 }
-
 
 export default function Chat() {
   const [conversationId, setConversationId] = useState(() => newConversationId());
   const [messages, setMessages] = useState([
-    { id: "sys", role: "assistant", content: "Hey — ask me a training question and I’ll answer using your knowledge base." },
+    {
+      id: "sys",
+      role: "assistant",
+      content: "Hey — ask me a training question and I’ll answer using your knowledge base.",
+    },
   ]);
   const [input, setInput] = useState("");
   const [topK, setTopK] = useState(8);
   const [isStreaming, setIsStreaming] = useState(false);
+
   const abortRef = useRef(null);
   const bottomRef = useRef(null);
 
+  // Avatar
+  const videoRef = useRef(null);
+  const avatar = useAzureAvatar({
+    videoRef,
+    character: "lisa",
+    style: "casual-sitting",
+    // voice: "en-US-JennyNeural",
+  });
+
+  // Used to speak the full response after streaming finishes
+  const assistantTextRef = useRef("");
+
   const canSend = input.trim().length > 0 && !isStreaming;
 
+  // Scroll to bottom as messages stream in
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isStreaming]);
 
-  const startNewChat = () => {
-    abortRef.current?.abort?.();
-    abortRef.current = null;
-    setIsStreaming(false);
-
-    // stop mic if it’s on
-    stt.disconnect();
-
-    setConversationId(newConversationId());
-    setMessages([{ id: "sys", role: "assistant", content: "New chat started. Ask your next question." }]);
-  };
+  // Connect avatar on mount (requires a user gesture in some browsers for audio/video autoplay)
+  useEffect(() => {
+    avatar.connect();
+    return () => avatar.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const stop = () => {
     abortRef.current?.abort?.();
     abortRef.current = null;
     setIsStreaming(false);
+    avatar.stopSpeaking();
   };
 
-  // --- NEW: generic sender used by text input and STT final ---
+  const startNewChat = () => {
+    stop(); // abort streaming + stop avatar
+    stt.disconnect(); // stop mic if on
+
+    setConversationId(newConversationId());
+    setMessages([{ id: "sys", role: "assistant", content: "New chat started. Ask your next question." }]);
+  };
+
   const sendQuestion = async (question) => {
-    const q = question.trim();
+    const q = String(question || "").trim();
     if (!q) return;
+
+    // barge-in: stop avatar speech if user asks a new question
+    avatar.stopSpeaking();
 
     setInput("");
 
     const userMsgId = `u_${Date.now()}`;
     const assistantMsgId = `a_${Date.now()}`;
+
+    // reset spoken buffer
+    assistantTextRef.current = "";
 
     setMessages((prev) => [
       ...prev,
@@ -69,45 +96,61 @@ export default function Chat() {
         question: q,
         topK,
         signal: controller.signal,
-        onMeta: (_meta) => {},
+        onMeta: () => {},
         onToken: (token) => {
+          assistantTextRef.current += token;
+
           setMessages((prev) =>
-            prev.map((m) => (m.id === assistantMsgId ? { ...m, content: m.content + token } : m))
+            prev.map((m) => (m.id === assistantMsgId ? { ...m, content: (m.content || "") + token } : m))
           );
         },
-        onDone: () => { setIsStreaming(false); abortRef.current = null; },
+        onDone: async () => {
+          setIsStreaming(false);
+          abortRef.current = null;
+
+          // speak once per assistant answer (v1)
+          if (assistantTextRef.current.trim()) {
+            avatar.speak(assistantTextRef.current);
+          }
+        },
         onError: (payload) => {
-          setIsStreaming(false); abortRef.current = null;
+          setIsStreaming(false);
+          abortRef.current = null;
+
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantMsgId
-                ? { ...m, content: (m.content || "") + `\n\n[Error] ${payload?.error || "Unknown error"}` }
+                ? {
+                    ...m,
+                    content: (m.content || "") + `\n\n[Error] ${payload?.error || "Unknown error"}`,
+                  }
                 : m
             )
           );
         },
       });
     } catch (e) {
-      setIsStreaming(false); abortRef.current = null;
+      setIsStreaming(false);
+      abortRef.current = null;
+
       setMessages((prev) =>
-        prev.map((m) => (m.id === assistantMsgId ? { ...m, content: `[Error] ${String(e?.message || e)}` } : m))
+        prev.map((m) =>
+          m.id === assistantMsgId ? { ...m, content: `[Error] ${String(e?.message || e)}` } : m
+        )
       );
     }
   };
 
   const send = async () => sendQuestion(input);
 
-  // --- NEW: wire up the STT hook ---
-  const stt = useStt({
-    wsUrl: "ws://127.0.0.1:5050/ws/stt", // use wss:// if your frontend runs under https://
-    conversationId,
-    // we’re keeping your UI unchanged; no live caption rendering
+  // Azure STT (browser mic -> Azure Speech -> final text -> sendQuestion)
+  const stt = useAzureStt({
     onPartial: () => {},
     onFinal: (text) => {
-      // only send if assistant isn’t already streaming a previous answer
+      // only send if we’re not already streaming an answer
       if (text && !isStreaming) sendQuestion(text);
     },
-    onError: (err) => console.warn("STT error:", err),
+    onError: (err) => console.warn("Azure STT error:", err),
   });
 
   const onKeyDown = (e) => {
@@ -116,7 +159,6 @@ export default function Chat() {
       if (canSend) send();
     }
   };
-
 
   return (
     <div style={styles.page}>
@@ -150,11 +192,57 @@ export default function Chat() {
             <button onClick={stop} style={{ ...styles.btn, ...styles.btnDanger }}>
               Stop
             </button>
-            
           )}
         </div>
       </div>
-      
+
+      {/* Avatar panel */}
+      <div style={styles.avatarBar}>
+        <div style={styles.avatarLeft}>
+          <div style={styles.avatarStatus}>
+            Avatar: <b>{avatar.status}</b>
+            {avatar.lastError ? <span style={styles.avatarError}> — {avatar.lastError}</span> : null}
+          </div>
+
+          <video ref={videoRef} autoPlay playsInline muted={true} style={styles.avatarVideo} />
+          <button
+  onClick={async () => {
+    try {
+      const v = videoRef.current;
+      v.muted = false;
+      v.volume = 1.0;
+      await v.play(); // user gesture unlock
+      console.log("[AVATAR] audio unlocked", {
+        muted: v.muted,
+        volume: v.volume,
+      });
+    } catch (e) {
+      console.warn("[AVATAR] play blocked:", e);
+    }
+  }}
+  style={styles.btn}
+>
+  Enable Audio
+</button>
+
+
+          <div style={styles.avatarHint}>
+            If video/audio doesn’t start, click “Connect Avatar” (browser autoplay policies).
+          </div>
+        </div>
+
+        <div style={styles.avatarBtns}>
+          <button onClick={avatar.connect} style={styles.btn}>
+            Connect Avatar
+          </button>
+          <button onClick={avatar.disconnect} style={styles.btn}>
+            Disconnect
+          </button>
+          <button onClick={avatar.stopSpeaking} style={styles.btn}>
+            Stop Talking
+          </button>
+        </div>
+      </div>
 
       <div style={styles.chat}>
         {messages.map((m) => (
@@ -165,19 +253,15 @@ export default function Chat() {
               ...(m.role === "user" ? styles.userBubble : styles.assistantBubble),
             }}
           >
-            <div style={styles.role}>
-              {m.role === "user" ? "You" : "Trainer"}
-            </div>
-            <div style={styles.content}>
-              {m.content || (m.role === "assistant" && isStreaming ? "…" : "")}
-            </div>
+            <div style={styles.role}>{m.role === "user" ? "You" : "Trainer"}</div>
+            <div style={styles.content}>{m.content || (m.role === "assistant" && isStreaming ? "…" : "")}</div>
           </div>
         ))}
+
         {isStreaming && (
-          <div style={{ ...styles.typing, ...styles.assistantBubble }}>
-            Trainer is typing…
-          </div>
+          <div style={{ ...styles.typing, ...styles.assistantBubble }}>Trainer is typing…</div>
         )}
+
         <div ref={bottomRef} />
       </div>
 
@@ -191,8 +275,8 @@ export default function Chat() {
           placeholder="Ask a question… (Enter to send, Shift+Enter for newline)"
           disabled={isStreaming}
         />
-        
- <button
+
+        <button
           onClick={stt.toggle}
           style={{ ...styles.sendBtn, ...(stt.isMicOn ? styles.micOn : styles.micOff) }}
           title={stt.isMicOn ? "Turn mic off" : "Turn mic on"}
@@ -203,7 +287,6 @@ export default function Chat() {
         <button onClick={send} style={styles.sendBtn} disabled={!canSend}>
           Send
         </button>
-
       </div>
     </div>
   );
@@ -247,6 +330,27 @@ const styles = {
     cursor: "pointer",
   },
   btnDanger: { borderColor: "#7f1d1d", background: "#2a0f12" },
+
+  avatarBar: {
+    padding: 12,
+    borderBottom: "1px solid #1f2a37",
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  avatarLeft: { display: "flex", flexDirection: "column", gap: 8 },
+  avatarStatus: { fontSize: 12, opacity: 0.85 },
+  avatarError: { marginLeft: 8, color: "#fca5a5" },
+  avatarVideo: {
+    width: 320,
+    height: 240,
+    borderRadius: 12,
+    background: "#000",
+    border: "1px solid #1f2a37",
+  },
+  avatarHint: { fontSize: 12, opacity: 0.65, maxWidth: 320 },
+  avatarBtns: { display: "flex", flexDirection: "column", gap: 8, alignItems: "stretch" },
 
   chat: {
     flex: 1,
@@ -303,4 +407,7 @@ const styles = {
     cursor: "pointer",
     opacity: 1,
   },
+
+  micOn: { background: "#16a34a" },
+  micOff: { background: "#334155" },
 };
