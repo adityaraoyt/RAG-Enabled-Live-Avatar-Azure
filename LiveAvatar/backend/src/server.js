@@ -11,10 +11,18 @@ import { trainerStreamRouter } from "./rag/trainerStreamRoute.js";
 import { azureSpeechRouter } from "./rag/azureSpeechRoute.js";
 
 // ✅ correct casing
-import attachSttWebSocket from "../ws/sttWs.js";
+//import attachSttWebSocket from "../ws/sttWs.js";
 
 const app = express();
-app.use(cors({ origin: config.corsOrigin, credentials: true }));
+const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:5173";
+
+app.use(
+  cors({
+    origin: corsOrigin,
+    credentials: true,
+  })
+);
+
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/health", (req, res) => res.json({ ok: true }));
@@ -28,12 +36,14 @@ app.use("/api/azure", azureSpeechRouter);
 const server = http.createServer(app);
 
 // Optional: keep your STT WS for now
-attachSttWebSocket(server, { path: "/ws/stt" });
+//attachSttWebSocket(server, { path: "/ws/stt" });
 
 
-server.listen(config.port, () => {
-  console.log(`✅ Backend running: http://localhost:${config.port}`);
-  console.log(`🎧 STT WebSocket: ws://localhost:${config.port}/ws/stt`);
-  console.log(`🧊 Azure ICE: http://localhost:${config.port}/api/azure/ice`);
-  console.log(`🔑 Azure token: http://localhost:${config.port}/api/azure/speech-token`);
+const port = Number(process.env.PORT || config.port || 5050);
+
+server.listen(port, () => {
+  console.log(`✅ Backend running on port ${port}`);
+  console.log(`🎧 STT WebSocket: /ws/stt`);
+  console.log(`🧊 Azure ICE: /api/azure/ice`);
+  console.log(`🔑 Azure token: /api/azure/speech-token`);
 });

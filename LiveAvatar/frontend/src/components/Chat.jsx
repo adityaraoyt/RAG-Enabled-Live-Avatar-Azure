@@ -1,4 +1,3 @@
-
 import { useEffect, useRef, useState } from "react";
 import { streamTrainerResponse } from "../api";
 import { useAzureStt } from "../hooks/useAzureStt.js";
@@ -43,12 +42,28 @@ export default function Chat() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isStreaming]);
 
-  // Connect avatar on mount (requires a user gesture in some browsers for audio/video autoplay)
-  useEffect(() => {
-    avatar.connect();
-    return () => avatar.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Helper: unlock audio (must be triggered by a user gesture)
+  const unlockAvatarAudio = async () => {
+    try {
+      const v = videoRef.current;
+      if (!v) return;
+      v.muted = false;
+      v.volume = 1.0;
+      await v.play(); // user gesture unlock
+      console.log("[AVATAR] audio unlocked", { muted: v.muted, volume: v.volume });
+    } catch (e) {
+      console.warn("[AVATAR] play blocked:", e);
+    }
+  };
+
+  // Optional: do NOT auto-connect on mount anymore.
+  // The Connect Avatar button will both connect and unlock audio reliably.
+  // If you want to keep auto-connect, you can, but audio may still require a gesture.
+  // useEffect(() => {
+  //   avatar.connect();
+  //   return () => avatar.disconnect();
+  //   // eslint-disable-next-line react-hooks/exhaustive-deps
+  // }, []);
 
   const stop = () => {
     abortRef.current?.abort?.();
@@ -204,42 +219,32 @@ export default function Chat() {
             {avatar.lastError ? <span style={styles.avatarError}> — {avatar.lastError}</span> : null}
           </div>
 
-          <video ref={videoRef} autoPlay playsInline muted={true} style={styles.avatarVideo} />
-          <button
-  onClick={async () => {
-    try {
-      const v = videoRef.current;
-      v.muted = false;
-      v.volume = 1.0;
-      await v.play(); // user gesture unlock
-      console.log("[AVATAR] audio unlocked", {
-        muted: v.muted,
-        volume: v.volume,
-      });
-    } catch (e) {
-      console.warn("[AVATAR] play blocked:", e);
-    }
-  }}
-  style={styles.btn}
->
-  Enable Audio
-</button>
-
+          {/* Keep muted for reliable autoplay; Connect button will unlock */}
+          <video ref={videoRef} autoPlay playsInline muted style={styles.avatarVideo} />
 
           <div style={styles.avatarHint}>
-            If video/audio doesn’t start, click “Connect Avatar” (browser autoplay policies).
+            Click “Connect Avatar” once to start video and unlock audio (browser autoplay policies).
           </div>
         </div>
 
         <div style={styles.avatarBtns}>
-          <button onClick={avatar.connect} style={styles.btn}>
+          <button
+            onClick={async () => {
+              await avatar.connect();
+              await unlockAvatarAudio();
+            }}
+            style={styles.btn}
+          >
             Connect Avatar
           </button>
-          <button onClick={avatar.disconnect} style={styles.btn}>
+
+          <button
+            onClick={async () => {
+              await avatar.disconnect();
+            }}
+            style={styles.btn}
+          >
             Disconnect
-          </button>
-          <button onClick={avatar.stopSpeaking} style={styles.btn}>
-            Stop Talking
           </button>
         </div>
       </div>
