@@ -102,7 +102,7 @@ export const trainerStreamRouter = express.Router();
 
 const schema = z.object({
   conversationId: z.string().min(4).optional(),
-  question: z.string().min(3),
+  question: z.string(),
   topK: z.number().int().min(1).max(20).optional(),
   course_id: z.string().optional(),
   module_id: z.string().optional(),
