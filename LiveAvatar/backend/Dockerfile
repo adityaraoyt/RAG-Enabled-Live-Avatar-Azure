@@ -14,3 +14,6 @@ ENV PORT=8080
 EXPOSE 8080
 
 CMD ["node", "src/server.js"]
+
+
+# Backend Deployed on Azure App Service
