@@ -20,14 +20,14 @@ jobs:
           submodules: true
           lfs: false
 
-      # ✅ force build (guarantees dist exists)
       - name: Install + Build (Vite)
         working-directory: LiveAvatar/frontend
         run: |
           npm ci
           npm run build
           ls -la dist
-          sed -n '1,80p' dist/index.html
+          echo "---- dist/index.html ----"
+          sed -n '1,120p' dist/index.html
 
       - name: Build And Deploy
         id: builddeploy
@@ -36,14 +36,11 @@ jobs:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_ICY_STONE_0849D7E1E }}
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           action: "upload"
-
-          # ✅ point SWA at the already-built app
           app_location: "LiveAvatar/frontend"
-          output_location: "dist"
           api_location: ""
-
-          # ✅ key: don't let SWA do its own build
+          output_location: "dist"
           skip_app_build: true
+
 
 
   close_pull_request_job:
