@@ -27,7 +27,7 @@ jobs:
         run: |
           npm ci
           npm run build
-
+          sed -n '1,80p' dist/index.html
 
       - name: Build And Deploy
         id: builddeploy
