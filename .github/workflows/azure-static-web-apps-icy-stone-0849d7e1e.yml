@@ -22,12 +22,12 @@ jobs:
 
       - name: Install + Build (Vite)
         working-directory: LiveAvatar/frontend
+        env:
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
         run: |
           npm ci
           npm run build
-          ls -la dist
-          echo "---- dist/index.html ----"
-          sed -n '1,120p' dist/index.html
+
 
       - name: Build And Deploy
         id: builddeploy

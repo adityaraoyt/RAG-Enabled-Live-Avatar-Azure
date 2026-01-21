@@ -13,14 +13,21 @@ import { azureSpeechRouter } from "./rag/azureSpeechRoute.js";
 
 
 const app = express();
-const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:5173";
+const corsOrigins = (process.env.CORS_ORIGIN || "http://localhost:5173")
+  .split(",")
+  .map((s) => s.trim());
 
 app.use(
   cors({
-    origin: corsOrigin,
+    origin: (origin, cb) => {
+      // allow server-to-server/no-origin requests
+      if (!origin) return cb(null, true);
+      return cb(null, corsOrigins.includes(origin));
+    },
     credentials: true,
   })
 );
+
 
 app.use(express.json({ limit: "2mb" }));
 
