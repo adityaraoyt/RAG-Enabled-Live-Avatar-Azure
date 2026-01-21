@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as SpeechSDK from "microsoft-cognitiveservices-speech-sdk";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5050";
 
 /**
  * Azure real-time avatar (WebRTC) hook
@@ -134,12 +135,13 @@ export function useAzureAvatar({
 
     try {
       // 1) get token/region
-      const tokRes = await fetch("/api/azure/speech-token");
+      const tokRes = await fetch(`${API_BASE}/api/azure/speech-token`)
+
       const tok = await tokRes.json();
       if (!tokRes.ok || tok.error) throw new Error(tok.error || "Failed to fetch speech token");
 
       // 2) get ICE / relay token
-      const iceRes = await fetch("/api/azure/ice");
+      const iceRes = await fetch(`${API_BASE}/api/azure/ice`);
       const ice = await iceRes.json();
       console.log("[AVATAR] raw ice payload:", ice);
 

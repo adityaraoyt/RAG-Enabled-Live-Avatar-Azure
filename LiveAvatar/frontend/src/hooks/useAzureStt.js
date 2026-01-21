@@ -4,12 +4,12 @@ import * as SpeechSDK from "microsoft-cognitiveservices-speech-sdk";
 export function useAzureStt({ onPartial, onFinal, onError, language = "en-US" }) {
   const [isMicOn, setIsMicOn] = useState(false);
   const recognizerRef = useRef(null);
-
+  const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5050";
   const start = useCallback(async () => {
     if (isMicOn) return;
 
     try {
-      const r = await fetch("/api/azure/speech-token");
+      const r = await fetch(`${API_BASE}/api/azure/speech-token`);
       const { token, region, error } = await r.json();
       if (!r.ok || error) throw new Error(error || "Failed to get speech token");
 
