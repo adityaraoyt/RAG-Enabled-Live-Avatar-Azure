@@ -38,11 +38,9 @@ jobs:
           action: "upload"
 
           # keep this as your source folder
-          app_location: "LiveAvatar/frontend"
+          app_location: "LiveAvatar/frontend/dist"
           api_location: ""
 
-          # ✅ NEW: explicitly upload dist artifacts
-          app_artifact_location: "LiveAvatar/frontend/dist"
 
           # ✅ since we upload artifacts, skip SWA build
           skip_app_build: true
