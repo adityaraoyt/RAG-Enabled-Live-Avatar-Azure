@@ -19,19 +19,32 @@ jobs:
         with:
           submodules: true
           lfs: false
+
+      # ✅ force build (guarantees dist exists)
+      - name: Install + Build (Vite)
+        working-directory: LiveAvatar/frontend
+        run: |
+          npm ci
+          npm run build
+          ls -la dist
+          sed -n '1,80p' dist/index.html
+
       - name: Build And Deploy
         id: builddeploy
         uses: Azure/static-web-apps-deploy@v1
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_ICY_STONE_0849D7E1E }}
-          repo_token: ${{ secrets.GITHUB_TOKEN }} # Used for Github integrations (i.e. PR comments)
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
           action: "upload"
-          ###### Repository/Build Configurations - These values can be configured to match your app requirements. ######
-          # For more information regarding Static Web App workflow configurations, please visit: https://aka.ms/swaworkflowconfig
-          app_location: "LiveAvatar/frontend" # App source code path
-          api_location: "" # Api source code path - optional
-          output_location: "dist" # Built app content directory - optional
-          ###### End of Repository/Build Configurations ######
+
+          # ✅ point SWA at the already-built app
+          app_location: "LiveAvatar/frontend"
+          output_location: "dist"
+          api_location: ""
+
+          # ✅ key: don't let SWA do its own build
+          skip_app_build: true
+
 
   close_pull_request_job:
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
