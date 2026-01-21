@@ -36,10 +36,17 @@ jobs:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_ICY_STONE_0849D7E1E }}
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           action: "upload"
+
+          # keep this as your source folder
           app_location: "LiveAvatar/frontend"
           api_location: ""
-          output_location: "dist"
+
+          # ✅ NEW: explicitly upload dist artifacts
+          app_artifact_location: "LiveAvatar/frontend/dist"
+
+          # ✅ since we upload artifacts, skip SWA build
           skip_app_build: true
+
 
 
 
