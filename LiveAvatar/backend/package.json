@@ -1,0 +1,25 @@
+{
+  "name": "liveavatar-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node src/server.js", 
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@azure/core-auth": "^1.10.0",
+    "@azure/search-documents": "^12.1.0",
+    "@heygen/liveavatar-web-sdk": "^0.0.10",
+    "@heygen/streaming-avatar": "^2.1.0",
+    "@microsoft/fetch-event-source": "^2.0.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "ffmpeg": "^0.0.4",
+    "microsoft-cognitiveservices-speech-sdk": "^1.47.0",
+    "node-fetch": "^3.3.2",
+    "openai": "^4.67.3",
+    "ws": "^8.19.0",
+    "zod": "^3.24.1"
+  }
+}

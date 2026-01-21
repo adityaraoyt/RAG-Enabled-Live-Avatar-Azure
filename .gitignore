@@ -3,7 +3,7 @@ docs/
 node_modules/
 .venv/
 .vscode/
-package.json
+
 
 __pycache__/
 .DS_Store
