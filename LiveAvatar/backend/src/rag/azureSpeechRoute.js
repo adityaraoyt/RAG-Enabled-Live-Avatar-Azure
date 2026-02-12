@@ -15,7 +15,7 @@ function assertEnv(res) {
   return true;
 }
 
-// Speech token for browser Speech SDK (STT/TTS)
+// Speech token for browser Speech SDK (STT)
 azureSpeechRouter.get("/speech-token", async (req, res) => {
   if (!assertEnv(res)) return;
 
@@ -32,48 +32,6 @@ azureSpeechRouter.get("/speech-token", async (req, res) => {
     if (!r.ok) return res.status(500).json({ error: text });
 
     res.json({ token: text, region: SPEECH_REGION });
-  } catch (e) {
-    res.status(500).json({ error: String(e?.message || e) });
-  }
-});
-
-// ICE / relay token for WebRTC Avatar
-azureSpeechRouter.get("/ice", async (req, res) => {
-  if (!assertEnv(res)) return;
-
-  try {
-    const r = await fetch(
-      `https://${SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/avatar/relay/token/v1`,
-      {
-        method: "GET",
-        headers: { "Ocp-Apim-Subscription-Key": SPEECH_KEY },
-      }
-    );
-
-    // Azure should return JSON like { Urls: [...], Username: "...", Password: "..." }
-    const data = await r.json().catch(async () => ({ raw: await r.text() }));
-
-    // If Azure doesn't return relay URLs, fail loudly with details
-    if (!r.ok || !Array.isArray(data?.Urls) || data.Urls.length === 0) {
-      return res.status(500).json({
-        error:
-          "Avatar relay token not returned (Urls missing). Check Speech resource region supports avatar + key/region match.",
-        status: r.status,
-        data,
-      });
-    }
-
-    // Normalize to RTCIceServer[]
-    res.json({
-      iceServers: [
-        {
-          urls: data.Urls,
-          username: data.Username,
-          credential: data.Password,
-        },
-      ],
-      raw: data,
-    });
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
   }

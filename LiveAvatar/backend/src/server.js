@@ -9,8 +9,7 @@ import { ragRouter } from "./rag/ragRoute.js";
 import { trainerRouter } from "./rag/trainerRoute.js";
 import { trainerStreamRouter } from "./rag/trainerStreamRoute.js";
 import { azureSpeechRouter } from "./rag/azureSpeechRoute.js";
-
-
+import { liveAvatarRouter } from "./rag/liveAvatarRoute.js"; // ✅ ADD
 
 const app = express();
 const corsOrigins = (process.env.CORS_ORIGIN || "http://localhost:5173")
@@ -20,14 +19,12 @@ const corsOrigins = (process.env.CORS_ORIGIN || "http://localhost:5173")
 app.use(
   cors({
     origin: (origin, cb) => {
-      // allow server-to-server/no-origin requests
       if (!origin) return cb(null, true);
       return cb(null, corsOrigins.includes(origin));
     },
     credentials: true,
   })
 );
-
 
 app.use(express.json({ limit: "2mb" }));
 
@@ -37,13 +34,15 @@ app.use("/api/trainer", trainerRouter);
 app.use("/api/trainer", trainerStreamRouter);
 
 app.use("/api/azure", azureSpeechRouter);
+app.use("/api/liveavatar", liveAvatarRouter); // ✅ ADD
 
 const server = http.createServer(app);
-
 const port = Number(process.env.PORT || config.port || 5050);
 
 server.listen(port, () => {
   console.log(`✅ Backend running on port ${port}`);
-  console.log(`🧊 Azure ICE: /api/azure/ice`);
   console.log(`🔑 Azure token: /api/azure/speech-token`);
+  console.log(`🧑‍🎤 LiveAvatar session: /api/liveavatar/session`);
+  console.log(`🗣️  LiveAvatar speak: /api/liveavatar/speak`);
+  console.log(`✋ LiveAvatar interrupt: /api/liveavatar/interrupt`);
 });

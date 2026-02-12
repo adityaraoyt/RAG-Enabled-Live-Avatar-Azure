@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { streamTrainerResponse } from "../api";
 import { useAzureStt } from "../hooks/useAzureStt.js";
-import { useAzureAvatar } from "../hooks/useAzureAvatar.js";
+//import { useAzureAvatar } from "../hooks/useAzureAvatar.js";
+import { useLiveAvatar } from "../hooks/useLiveAvatar.js";
 
 function newConversationId() {
   return (crypto?.randomUUID?.() ?? `conv_${Date.now()}_${Math.random()}`).toString();
@@ -25,13 +26,12 @@ export default function Chat() {
 
   // Avatar
   const videoRef = useRef(null);
-  const avatar = useAzureAvatar({
-    videoRef,
-    character: "lisa",
-    style: "casual-sitting",
-    // voice: "en-US-JennyNeural",
-  });
-
+  const avatar = useLiveAvatar({
+   videoRef,
+   avatar_id: import.meta.env.VITE_LIVEAVATAR_AVATAR_ID,
+   voice: "en-US-DavisNeural",
+ });
+   
   // Used to speak the full response after streaming finishes
   const assistantTextRef = useRef("");
 
