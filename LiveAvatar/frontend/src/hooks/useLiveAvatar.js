@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Room, RoomEvent, Track } from "livekit-client";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5050";
+console.log("[useLiveAvatar] API_BASE =", API_BASE);
 
 export function useLiveAvatar({ videoRef, avatar_id, voice = "en-US-JennyNeural" } = {}) {
   const [status, setStatus] = useState("idle"); // idle | connecting | ready | speaking | error
