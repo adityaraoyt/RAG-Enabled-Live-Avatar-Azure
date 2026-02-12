@@ -4,6 +4,9 @@ import { useAzureStt } from "../hooks/useAzureStt.js";
 //import { useAzureAvatar } from "../hooks/useAzureAvatar.js";
 import { useLiveAvatar } from "../hooks/useLiveAvatar.js";
 
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5050";
+console.log("[useLiveAvatar] API_BASE =", API_BASE);
+
 function newConversationId() {
   return (crypto?.randomUUID?.() ?? `conv_${Date.now()}_${Math.random()}`).toString();
 }
