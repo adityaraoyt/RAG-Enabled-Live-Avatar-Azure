@@ -24,6 +24,7 @@ jobs:
         working-directory: LiveAvatar/frontend
         env:
           VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
+          VITE_LIVEAVATAR_AVATAR_ID: ${{ secrets.VITE_LIVEAVATAR_AVATAR_ID }}
         run: |
           npm ci
           npm run build
@@ -60,3 +61,4 @@ jobs:
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_ICY_STONE_0849D7E1E }}
           action: "close"
+
