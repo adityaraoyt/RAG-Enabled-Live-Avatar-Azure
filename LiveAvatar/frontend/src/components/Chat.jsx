@@ -31,7 +31,7 @@ export default function Chat() {
    avatar_id: import.meta.env.VITE_LIVEAVATAR_AVATAR_ID,
    voice: "en-US-DavisNeural",
  });
-   
+   console.log("Avatar id:", import.meta.env.VITE_LIVEAVATAR_AVATAR_ID)
   // Used to speak the full response after streaming finishes
   const assistantTextRef = useRef("");
 
