@@ -8,7 +8,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5050";
  * - speak(text): avatar speaks
  * - stopSpeaking(): barge-in stop
  *
- * Fixes:
+ * Fixes: 
  * - Normalizes Azure ICE payload into RTCIceServer[]
  * - Adds recvonly transceivers (video+audio) so tracks arrive reliably
  * - Adds WebRTC debug logging + ontrack logging
