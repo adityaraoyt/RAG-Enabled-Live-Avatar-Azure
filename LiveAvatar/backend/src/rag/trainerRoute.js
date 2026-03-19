@@ -4,6 +4,28 @@ import { embedText, chatCompletion } from "./aoai.js";
 import { vectorSearch } from "./azureSearch.js";
 import { systemPrompt, userPrompt } from "./prompt.js";
 
+const DEBUG_RAG = process.env.DEBUG_RAG === "true" || process.env.DEBUG_RAG === "1";
+
+function nowMs() {
+  return Number(process.hrtime.bigint()) / 1e6;
+}
+
+function truncateDebugText(str, maxChars) {
+  const s = String(str ?? "");
+  return s.length > maxChars ? s.slice(0, maxChars) + "..." : s;
+}
+
+function toDebugChunk(p) {
+  return {
+    source: p?.doc_id || p?.path || p?.source_type || "unknown",
+    path: p?.path,
+    chunk_id: p?.id ?? p?.chunk_num ?? null,
+    score: typeof p?.score === "number" ? p.score : p?.score ?? null,
+    page_num: p?.page_num ?? null,
+    text: truncateDebugText(p?.content ?? "", 2000),
+  };
+}
+
 export const trainerRouter = express.Router();
 
 const schema = z.object({
@@ -29,17 +51,44 @@ trainerRouter.post("/respond", async (req, res) => {
   const { question, topK = 8, course_id, module_id, persona = "instructor" } = parsed.data;
 
   try {
+    const debug_info = {
+      original_query: question,
+      search_query: question,
+      retrieved_chunks: [],
+      final_context: null,
+      final_answer: null,
+      timings: {},
+    };
+
+    const overallStartMs = nowMs();
+    const retrievalStartMs = overallStartMs;
+
     const embedding = await embedText(question);
     const filter = buildFilter({ course_id, module_id });
 
     const passages = await vectorSearch({ embedding, k: topK, filter });
+
+    if (DEBUG_RAG) debug_info.retrieved_chunks = passages.map(toDebugChunk);
 
     const sys = systemPrompt() + `\nStyle: ${persona}. Keep it spoken and natural.`;
     const usr =
       userPrompt(question, passages) +
       `\n\nReturn ONLY the spoken answer (no markdown, no bullet lists unless necessary).`;
 
+    if (DEBUG_RAG) debug_info.final_context = { system: sys, user: truncateDebugText(usr, 12000) };
+
+    const generationStartMs = nowMs();
     const speech = await chatCompletion({ system: sys, user: usr });
+
+    if (DEBUG_RAG) {
+      const endMs = nowMs();
+      debug_info.final_answer = speech;
+      debug_info.timings = {
+        retrieval_ms: Math.round((generationStartMs - retrievalStartMs) * 100) / 100,
+        generation_ms: Math.round((endMs - generationStartMs) * 100) / 100,
+        total_ms: Math.round((endMs - overallStartMs) * 100) / 100,
+      };
+    }
 
     res.json({
       speech,
@@ -49,6 +98,7 @@ trainerRouter.post("/respond", async (req, res) => {
         path: p.path,
         page_num: p.page_num,
       })),
+      ...(DEBUG_RAG ? { debug: debug_info } : {}),
     });
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });

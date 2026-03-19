@@ -4,6 +4,28 @@ import { embedText, chatCompletion, chatCompletionStream, normalizeCompletion } 
 import { vectorSearch } from "./azureSearch.js";
 import { systemPrompt, userPrompt } from "./prompt.js";
 
+const DEBUG_RAG = process.env.DEBUG_RAG === "true" || process.env.DEBUG_RAG === "1";
+
+function nowMs() {
+  return Number(process.hrtime.bigint()) / 1e6;
+}
+
+function truncateDebugText(str, maxChars) {
+  const s = String(str ?? "");
+  return s.length > maxChars ? s.slice(0, maxChars) + "..." : s;
+}
+
+function toDebugChunk(p) {
+  return {
+    source: p?.doc_id || p?.path || p?.source_type || "unknown",
+    path: p?.path,
+    chunk_id: p?.id ?? p?.chunk_num ?? null,
+    score: typeof p?.score === "number" ? p.score : p?.score ?? null,
+    page_num: p?.page_num ?? null,
+    text: truncateDebugText(p?.content ?? "", 2000),
+  };
+}
+
 
 async function resolveQuestion({ chatCompletion, history, question }) {
   // Keep transcript short so it doesn't drift
@@ -135,6 +157,19 @@ trainerStreamRouter.post("/respond/stream", async (req, res) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
+  const debug_info = {
+    original_query: question,
+    search_query: null,
+    retrieved_chunks: [],
+    final_context: null,
+    final_answer: null,
+    timings: {},
+  };
+
+  const overallStartMs = nowMs();
+  const retrievalStartMs = overallStartMs;
+  let generationStartMs = null;
+
   // Build retrieval query using recent history + current question
   const history = getHistory(conversationId, 8); // small window
   const lastUserTurns = history
@@ -192,17 +227,29 @@ const rewrittenQuery = rewriteFiltered ? question : (rewrittenQueryText || quest
     // Always include the raw question + context query + up to 3 rewrite queries
     const retrievalQueries = [question, contextQuery, ...rewriteQueries].slice(0, 5);
 
+    if (DEBUG_RAG) debug_info.search_query = retrievalQueries;
+
     // Embed + search each query, then fuse
     const results = [];
     for (const q of retrievalQueries) {
       const emb = await embedText(q);
       const hits = await vectorSearch({ embedding: emb, k: topK, filter });
+      if (DEBUG_RAG) {
+        // Keep raw per-query hits too; this is extremely helpful to debug ranking/fusion failures.
+        if (!debug_info.raw_search_hits) debug_info.raw_search_hits = [];
+        debug_info.raw_search_hits.push({
+          query: q,
+          top_k: topK,
+          hits: hits.slice(0, topK).map(toDebugChunk),
+        });
+      }
       results.push(...hits);
     }
 
     // Merge + dedupe + keep a reasonable cap
     const passages = dedupePassages(results).slice(0, topK * 3);
 
+    if (DEBUG_RAG) debug_info.retrieved_chunks = passages.map(toDebugChunk);
 
     // Build prompt with history
     
@@ -211,15 +258,20 @@ const rewrittenQuery = rewriteFiltered ? question : (rewrittenQueryText || quest
     // IMPORTANT: exclude the latest user msg in history because we add it explicitly
     const historyWithoutLatest = history.slice(0, -1);
 
+    const userMsgContent =
+      userPrompt(resolvedQuestion, passages) +
+      "\n\nReturn ONLY the spoken answer. No markdown.";
+
     const messages = [
       { role: "system", content: sys },
       ...historyWithoutLatest,
       {
         role: "user",
-        content: userPrompt(resolvedQuestion, passages) +
-          "\n\nReturn ONLY the spoken answer. No markdown.",
+        content: userMsgContent,
       },
     ];
+
+    if (DEBUG_RAG) debug_info.final_context = { system: sys, user: truncateDebugText(userMsgContent, 12000) };
 
     send("meta", {
       conversationId,
@@ -232,6 +284,7 @@ const rewrittenQuery = rewriteFiltered ? question : (rewrittenQueryText || quest
     });
 
     // Stream tokens
+    generationStartMs = nowMs();
     const stream = await chatCompletionStream(messages);
 
     let full = "";
@@ -243,7 +296,17 @@ const rewrittenQuery = rewriteFiltered ? question : (rewrittenQueryText || quest
     full = full.trim();
     pushMsg(conversationId, { role: "assistant", content: full });
 
-    send("done", { ok: true });
+    if (DEBUG_RAG) {
+      const generationEndMs = nowMs();
+      debug_info.final_answer = full;
+      debug_info.timings = {
+        retrieval_ms: Math.round((generationStartMs - retrievalStartMs) * 100) / 100,
+        generation_ms: Math.round((generationEndMs - generationStartMs) * 100) / 100,
+        total_ms: Math.round((generationEndMs - overallStartMs) * 100) / 100,
+      };
+    }
+
+    send("done", DEBUG_RAG ? { ok: true, debug: debug_info } : { ok: true });
     res.end();
   
 } catch (e) {
@@ -251,7 +314,18 @@ const rewrittenQuery = rewriteFiltered ? question : (rewrittenQueryText || quest
     const fallback = "I'm unable to help with that request.";
     send("token", { token: fallback });
     pushMsg(conversationId, { role: "assistant", content: fallback });
-    send("done", { ok: true, filtered: true });
+    if (DEBUG_RAG) {
+      debug_info.final_answer = fallback;
+      const endMs = nowMs();
+      debug_info.timings = {
+        retrieval_ms: generationStartMs ? Math.round((generationStartMs - retrievalStartMs) * 100) / 100 : 0,
+        generation_ms: generationStartMs ? Math.round((endMs - generationStartMs) * 100) / 100 : 0,
+        total_ms: Math.round((endMs - overallStartMs) * 100) / 100,
+      };
+      send("done", { ok: true, filtered: true, debug: debug_info });
+    } else {
+      send("done", { ok: true, filtered: true });
+    }
     return res.end();
   }
 
@@ -268,6 +342,19 @@ trainerStreamRouter.post("/respond", async (req, res) => {
   let { conversationId, question, topK = 6, course_id, module_id } = parsed.data;
   if (!conversationId) conversationId = crypto.randomUUID?.() ?? String(Date.now());
 
+  const debug_info = {
+    original_query: question,
+    search_query: null,
+    retrieved_chunks: [],
+    final_context: null,
+    final_answer: null,
+    timings: {},
+  };
+
+  const overallStartMs = nowMs();
+  const retrievalStartMs = overallStartMs;
+  let generationStartMs = null;
+
   try {
     const history = getHistory(conversationId, 20);
     const filter = buildFilter({ course_id, module_id });
@@ -279,6 +366,8 @@ trainerStreamRouter.post("/respond", async (req, res) => {
     // Always include the raw question + context query + up to 3 rewrite queries
     const retrievalQueries = [question, contextQuery, ...rewriteQueries].slice(0, 5);
 
+    if (DEBUG_RAG) debug_info.search_query = retrievalQueries;
+
     // Embed + search each query, then fuse
     const results = [];
     for (const q of retrievalQueries) {
@@ -289,6 +378,8 @@ trainerStreamRouter.post("/respond", async (req, res) => {
 
     // Merge + dedupe + keep a reasonable cap
     const passages = dedupePassages(results).slice(0, topK * 3);
+
+    if (DEBUG_RAG) debug_info.retrieved_chunks = passages.map(toDebugChunk);
 
     // Build prompt with history
     const sys = systemPrompt() + "\nKeep it spoken and training-friendly.";
@@ -308,27 +399,54 @@ trainerStreamRouter.post("/respond", async (req, res) => {
 
     // Get chat completion
     try {
-      
-const completion = await chatCompletion({
-  system: sys,
-  user: `Conversation so far:\n${historyWithoutLatest.map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n")}\n\nUser's last message:\n${question}\n\n`,
-});
+      const userForCompletion =
+        `Conversation so far:\n${historyWithoutLatest
+          .map(m => `${m.role.toUpperCase()}: ${m.content}`)
+          .join("\n")}\n\nUser's last message:\n${question}\n\n`;
 
-const { text: answer, filtered } = normalizeCompletion(completion);
+      if (DEBUG_RAG) debug_info.final_context = { system: sys, user: userForCompletion };
 
-if (filtered) {
-  return res.json({
-    success: true,
-    answer,
-    filtered: true,
-  });
-}
+      generationStartMs = nowMs();
+      const completion = await chatCompletion({
+        system: sys,
+        user: userForCompletion,
+      });
+
+      const { text: answer, filtered } = normalizeCompletion(completion);
+
+      if (filtered) {
+        if (DEBUG_RAG) {
+          const endMs = nowMs();
+          debug_info.final_answer = answer;
+          debug_info.timings = {
+            retrieval_ms: Math.round((generationStartMs - retrievalStartMs) * 100) / 100,
+            generation_ms: Math.round((endMs - generationStartMs) * 100) / 100,
+            total_ms: Math.round((endMs - overallStartMs) * 100) / 100,
+          };
+        }
+        return res.json({
+          success: true,
+          answer,
+          filtered: true,
+          ...(DEBUG_RAG ? { debug: debug_info } : {}),
+        });
+      }
 
 
       // Store user and assistant messages in the conversation history
       pushMsg(conversationId, { role: "assistant", content: answer });
 
       // Send response
+      const endMs = nowMs();
+      if (DEBUG_RAG) {
+        debug_info.final_answer = answer;
+        debug_info.timings = {
+          retrieval_ms: Math.round((generationStartMs - retrievalStartMs) * 100) / 100,
+          generation_ms: Math.round((endMs - generationStartMs) * 100) / 100,
+          total_ms: Math.round((endMs - overallStartMs) * 100) / 100,
+        };
+      }
+
       return res.json({
         success: true,
         answer,
@@ -338,6 +456,7 @@ if (filtered) {
           path: p.path,
           page_num: p.page_num,
         })),
+        ...(DEBUG_RAG ? { debug: debug_info } : {}),
       });
     } catch (err) {
       // fallback for other unexpected errors (optional)

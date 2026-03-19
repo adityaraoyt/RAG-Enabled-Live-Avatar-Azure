@@ -4,6 +4,28 @@ import { embedText, chatCompletion } from "./aoai.js";
 import { vectorSearch } from "./azureSearch.js";
 import { systemPrompt, userPrompt } from "./prompt.js";
 
+const DEBUG_RAG = process.env.DEBUG_RAG === "true" || process.env.DEBUG_RAG === "1";
+
+function nowMs() {
+  return Number(process.hrtime.bigint()) / 1e6;
+}
+
+function truncateDebugText(str, maxChars) {
+  const s = String(str ?? "");
+  return s.length > maxChars ? s.slice(0, maxChars) + "..." : s;
+}
+
+function toDebugChunk(p) {
+  return {
+    source: p?.doc_id || p?.path || p?.source_type || "unknown",
+    path: p?.path,
+    chunk_id: p?.id ?? p?.chunk_num ?? null,
+    score: typeof p?.score === "number" ? p.score : p?.score ?? null,
+    page_num: p?.page_num ?? null,
+    text: truncateDebugText(p?.content ?? "", 2000),
+  };
+}
+
 export const ragRouter = express.Router();
 
 const schema = z.object({
@@ -28,15 +50,45 @@ ragRouter.post("/answer", async (req, res) => {
   const { question, topK = 8, course_id, module_id } = parsed.data;
 
   try {
+    const debug_info = {
+      original_query: question,
+      search_query: question,
+      retrieved_chunks: [],
+      final_context: null,
+      final_answer: null,
+      timings: {},
+    };
+
+    const overallStartMs = nowMs();
+    const retrievalStartMs = overallStartMs;
+
     const embedding = await embedText(question);
     const filter = buildFilter({ course_id, module_id });
 
     const passages = await vectorSearch({ embedding, k: topK, filter });
 
+    if (DEBUG_RAG) debug_info.retrieved_chunks = passages.map(toDebugChunk);
+
+    const system = systemPrompt();
+    const user = userPrompt(question, passages);
+
+    if (DEBUG_RAG) debug_info.final_context = { system, user: truncateDebugText(user, 12000) };
+
+    const generationStartMs = nowMs();
     const answer = await chatCompletion({
-      system: systemPrompt(),
-      user: userPrompt(question, passages),
+      system,
+      user,
     });
+
+    if (DEBUG_RAG) {
+      const endMs = nowMs();
+      debug_info.final_answer = answer;
+      debug_info.timings = {
+        retrieval_ms: Math.round((generationStartMs - retrievalStartMs) * 100) / 100,
+        generation_ms: Math.round((endMs - generationStartMs) * 100) / 100,
+        total_ms: Math.round((endMs - overallStartMs) * 100) / 100,
+      };
+    }
 
     res.json({
       answer,
@@ -48,6 +100,7 @@ ragRouter.post("/answer", async (req, res) => {
         course_id: p.course_id,
         module_id: p.module_id,
       })),
+      ...(DEBUG_RAG ? { debug: debug_info } : {}),
     });
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });

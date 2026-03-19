@@ -22,6 +22,7 @@ export default function Chat() {
   const [input, setInput] = useState("");
   const [topK, setTopK] = useState(8);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [debugInfo, setDebugInfo] = useState(null);
 
   const abortRef = useRef(null);
   const bottomRef = useRef(null);
@@ -80,6 +81,7 @@ export default function Chat() {
 
     setConversationId(newConversationId());
     setMessages([{ id: "sys", role: "assistant", content: "New chat started. Ask your next question." }]);
+    setDebugInfo(null);
   };
 
   const sendQuestion = async (question) => {
@@ -121,7 +123,8 @@ export default function Chat() {
             prev.map((m) => (m.id === assistantMsgId ? { ...m, content: (m.content || "") + token } : m))
           );
         },
-        onDone: async () => {
+        onDone: async (payload) => {
+          setDebugInfo(payload?.debug ?? null);
           setIsStreaming(false);
           abortRef.current = null;
 
@@ -133,6 +136,7 @@ export default function Chat() {
         onError: (payload) => {
           setIsStreaming(false);
           abortRef.current = null;
+          setDebugInfo(null);
 
           setMessages((prev) =>
             prev.map((m) =>
@@ -149,6 +153,7 @@ export default function Chat() {
     } catch (e) {
       setIsStreaming(false);
       abortRef.current = null;
+      setDebugInfo(null);
 
       setMessages((prev) =>
         prev.map((m) =>
@@ -269,6 +274,61 @@ export default function Chat() {
           <div style={{ ...styles.typing, ...styles.assistantBubble }}>Trainer is typing…</div>
         )}
 
+        {debugInfo?.original_query ? (
+          <div style={styles.debugPanel}>
+            <details>
+              <summary style={styles.debugSummary}>Diagnostics (RAG)</summary>
+              <div style={styles.debugBody}>
+                <div style={styles.debugSectionTitle}>Query</div>
+                <div style={styles.debugLine}>
+                  <span style={styles.debugLabel}>Original:</span>{" "}
+                  <code style={styles.debugCode}>{String(debugInfo.original_query)}</code>
+                </div>
+                <div style={styles.debugLine}>
+                  <span style={styles.debugLabel}>Search/Rewritten:</span>{" "}
+                  <code style={styles.debugCode}>
+                    {typeof debugInfo.search_query === "string"
+                      ? debugInfo.search_query
+                      : JSON.stringify(debugInfo.search_query)}
+                  </code>
+                </div>
+
+                <div style={styles.debugSectionTitle}>Retrieved Chunks</div>
+                {(debugInfo.retrieved_chunks || []).slice(0, 8).map((c, idx) => (
+                  <div key={`${idx}_${c?.chunk_id ?? ""}`} style={styles.debugChunk}>
+                    <div style={styles.debugChunkHeader}>
+                      <b>{c?.source || "unknown"}</b>
+                      {typeof c?.score === "number" ? ` | score ${c.score}` : null}
+                      {c?.page_num !== null && c?.page_num !== undefined && c.page_num >= 0
+                        ? ` | page ${c.page_num + 1}`
+                        : null}
+                    </div>
+                    <pre style={styles.debugPre}>{truncate(String(c?.text ?? ""), 300)}</pre>
+                  </div>
+                ))}
+
+                <div style={styles.debugSectionTitle}>Final Context Sent to LLM</div>
+                <pre style={styles.debugPre}>{truncate(getFinalContextText(debugInfo.final_context), 2200)}</pre>
+
+                <div style={styles.debugSectionTitle}>Timings</div>
+                <div style={styles.debugLine}>
+                  Retrieval: <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.timings?.retrieval_ms)}</code> ms
+                </div>
+                <div style={styles.debugLine}>
+                  Generation:{" "}
+                  <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.timings?.generation_ms)}</code> ms
+                </div>
+                <div style={styles.debugLine}>
+                  Total: <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.timings?.total_ms)}</code> ms
+                </div>
+
+                <div style={styles.debugSectionTitle}>Final Answer</div>
+                <pre style={styles.debugPre}>{truncate(String(debugInfo.final_answer ?? ""), 1200)}</pre>
+              </div>
+            </details>
+          </div>
+        ) : null}
+
         <div ref={bottomRef} />
       </div>
 
@@ -387,6 +447,77 @@ const styles = {
     opacity: 0.8,
   },
 
+  debugPanel: {
+    marginTop: 8,
+    padding: 12,
+    borderRadius: 14,
+    border: "1px solid #1f2a37",
+    background: "#0f1620",
+  },
+  debugSummary: {
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 13,
+  },
+  debugBody: {
+    marginTop: 10,
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+  },
+  debugSectionTitle: {
+    fontSize: 12,
+    opacity: 0.8,
+    fontWeight: 800,
+    textTransform: "uppercase",
+    letterSpacing: "0.02em",
+  },
+  debugLine: {
+    fontSize: 13,
+    lineHeight: 1.35,
+  },
+  debugLabel: {
+    opacity: 0.7,
+    marginRight: 6,
+  },
+  debugCode: {
+    fontSize: 12,
+    padding: "2px 6px",
+    borderRadius: 8,
+    border: "1px solid #1f2a37",
+    background: "#0b0f14",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+  },
+  debugInlineCode: {
+    fontSize: 12,
+    padding: "2px 6px",
+    borderRadius: 8,
+    border: "1px solid #1f2a37",
+    background: "#0b0f14",
+  },
+  debugChunk: {
+    padding: "10px 10px",
+    borderRadius: 12,
+    border: "1px solid #1f2a37",
+    background: "#0b0f14",
+  },
+  debugChunkHeader: {
+    fontSize: 12,
+    opacity: 0.9,
+    marginBottom: 6,
+    wordBreak: "break-word",
+  },
+  debugPre: {
+    margin: 0,
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+    fontSize: 12,
+    lineHeight: 1.35,
+    maxHeight: 260,
+    overflow: "auto",
+  },
+
   inputBar: {
     padding: 12,
     borderTop: "1px solid #1f2a37",
@@ -418,3 +549,27 @@ const styles = {
   micOn: { background: "#16a34a" },
   micOff: { background: "#334155" },
 };
+
+function truncate(s, maxChars) {
+  const str = String(s ?? "");
+  return str.length > maxChars ? str.slice(0, maxChars) + "…" : str;
+}
+
+function fmtMs(v) {
+  if (typeof v === "number") return v.toFixed(2);
+  if (v === null || v === undefined) return "—";
+  return String(v);
+}
+
+function getFinalContextText(fc) {
+  if (!fc) return "";
+  if (typeof fc === "string") return fc;
+  if (typeof fc.user === "string") return fc.user;
+  if (typeof fc.final_context === "string") return fc.final_context;
+  // Best-effort fallback
+  try {
+    return JSON.stringify(fc, null, 2);
+  } catch {
+    return String(fc);
+  }
+}
