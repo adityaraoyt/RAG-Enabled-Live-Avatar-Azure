@@ -27,6 +27,11 @@ export default function Chat() {
   const abortRef = useRef(null);
   const bottomRef = useRef(null);
 
+  // Timing instrumentation (client-side)
+  const sttFinalAtRef = useRef(null); // when STT produces final text (or when user clicks Send)
+  const reqTimingsRef = useRef(null); // per-interaction timing markers
+  const metricsHistoryRef = useRef([]); // for dev-only p50/p95
+
   // Avatar
   const videoRef = useRef(null);
   const avatar = useLiveAvatar({
@@ -82,6 +87,8 @@ export default function Chat() {
     setConversationId(newConversationId());
     setMessages([{ id: "sys", role: "assistant", content: "New chat started. Ask your next question." }]);
     setDebugInfo(null);
+    sttFinalAtRef.current = null;
+    reqTimingsRef.current = null;
   };
 
   const sendQuestion = async (question) => {
@@ -106,6 +113,14 @@ export default function Chat() {
     ]);
 
     setIsStreaming(true);
+    const requestStartAt = performance.now();
+    reqTimingsRef.current = {
+      requestStartAt,
+      firstTokenAt: null,
+      doneAt: null,
+      speakCallAt: null,
+      speakRespAt: null,
+    };
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -117,6 +132,9 @@ export default function Chat() {
         signal: controller.signal,
         onMeta: () => {},
         onToken: (token) => {
+          if (reqTimingsRef.current && reqTimingsRef.current.firstTokenAt === null) {
+            reqTimingsRef.current.firstTokenAt = performance.now();
+          }
           assistantTextRef.current += token;
 
           setMessages((prev) =>
@@ -124,19 +142,98 @@ export default function Chat() {
           );
         },
         onDone: async (payload) => {
-          setDebugInfo(payload?.debug ?? null);
           setIsStreaming(false);
           abortRef.current = null;
 
-          // speak once per assistant answer (v1)
+          const doneAt = performance.now();
+          if (reqTimingsRef.current) reqTimingsRef.current.doneAt = doneAt;
+
+          const backendDebug = payload?.debug ?? null;
+          const backendTimings = backendDebug?.timings || {};
+          const rt = reqTimingsRef.current || {};
+          const sttAt = sttFinalAtRef.current;
+
+          const sttToRequestMs =
+            sttAt != null && rt.requestStartAt != null ? rt.requestStartAt - sttAt : null;
+          const totalToDoneMs = sttAt != null ? doneAt - sttAt : null;
+          const timeToFirstTokenMs =
+            rt.firstTokenAt != null && rt.requestStartAt != null ? rt.firstTokenAt - rt.requestStartAt : null;
+          const streamingMs = rt.firstTokenAt != null ? doneAt - rt.firstTokenAt : null;
+
+          let ttsProxyMs = null;
+          let totalToSpeakMs = null;
           if (assistantTextRef.current.trim()) {
-            avatar.speak(assistantTextRef.current);
+            const speakCallAt = performance.now();
+            if (reqTimingsRef.current) reqTimingsRef.current.speakCallAt = speakCallAt;
+
+            try {
+              await avatar.speak(assistantTextRef.current);
+            } catch {
+              // ignore; timing instrumentation still works for the backend part
+            }
+
+            const speakRespAt = performance.now();
+            if (reqTimingsRef.current) reqTimingsRef.current.speakRespAt = speakRespAt;
+            ttsProxyMs = speakRespAt - speakCallAt;
+            totalToSpeakMs = sttAt != null ? speakRespAt - sttAt : null;
           }
+
+          const reasons = [];
+          if (totalToDoneMs != null && totalToDoneMs > 2500) reasons.push(`total_to_done_ms>${2500}`);
+          if (typeof backendTimings?.retrieval_ms === "number" && backendTimings.retrieval_ms > 800)
+            reasons.push(`retrieval_ms>${800}`);
+          if (typeof backendTimings?.llm_generation_ms === "number" && backendTimings.llm_generation_ms > 2000)
+            reasons.push(`llm_generation_ms>${2000}`);
+          if (timeToFirstTokenMs != null && timeToFirstTokenMs > 1200) reasons.push(`ttft_ms>${1200}`);
+          if (ttsProxyMs != null && ttsProxyMs > 400) reasons.push(`tts_proxy_ms>${400}`);
+
+          const clientTimings = {
+            stt_to_request_ms: sttToRequestMs,
+            total_to_done_ms: totalToDoneMs,
+            time_to_first_token_ms: timeToFirstTokenMs,
+            streaming_ms: streamingMs,
+            tts_proxy_ms: ttsProxyMs,
+            total_to_speak_ms: totalToSpeakMs,
+            slow_path: {
+              is_slow: reasons.length > 0,
+              reasons,
+            },
+          };
+
+          // speak once per assistant answer (v1)
+          const combinedDebug = backendDebug
+            ? { ...backendDebug, client_timings: clientTimings }
+            : null;
+
+          setDebugInfo(combinedDebug);
+
+          if (combinedDebug) {
+            metricsHistoryRef.current.push({
+              // Client-visible / end-to-end
+              total_to_done_ms: clientTimings.total_to_done_ms,
+              total_to_speak_ms: clientTimings.total_to_speak_ms,
+              time_to_first_token_ms: clientTimings.time_to_first_token_ms,
+              streaming_ms: clientTimings.streaming_ms,
+              tts_proxy_ms: clientTimings.tts_proxy_ms,
+
+              // Backend stage timings
+              retrieval_ms: combinedDebug?.timings?.retrieval_ms,
+              reranking_ms: combinedDebug?.timings?.reranking_ms,
+              llm_generation_ms: combinedDebug?.timings?.llm_generation_ms,
+              backend_total_ms: combinedDebug?.timings?.backend_total_ms,
+            });
+            if (metricsHistoryRef.current.length > 50) metricsHistoryRef.current = metricsHistoryRef.current.slice(-50);
+          }
+
+          sttFinalAtRef.current = null;
+          reqTimingsRef.current = null;
         },
         onError: (payload) => {
           setIsStreaming(false);
           abortRef.current = null;
           setDebugInfo(null);
+          sttFinalAtRef.current = null;
+          reqTimingsRef.current = null;
 
           setMessages((prev) =>
             prev.map((m) =>
@@ -154,6 +251,8 @@ export default function Chat() {
       setIsStreaming(false);
       abortRef.current = null;
       setDebugInfo(null);
+      sttFinalAtRef.current = null;
+      reqTimingsRef.current = null;
 
       setMessages((prev) =>
         prev.map((m) =>
@@ -163,14 +262,21 @@ export default function Chat() {
     }
   };
 
-  const send = async () => sendQuestion(input);
+  const send = async () => {
+    // Use click time as "input capture end" for typed questions.
+    sttFinalAtRef.current = performance.now();
+    return sendQuestion(input);
+  };
 
   // Azure STT (browser mic -> Azure Speech -> final text -> sendQuestion)
   const stt = useAzureStt({
     onPartial: () => {},
     onFinal: (text) => {
       // only send if we’re not already streaming an answer
-      if (text && !isStreaming) sendQuestion(text);
+      if (text && !isStreaming) {
+        sttFinalAtRef.current = performance.now();
+        sendQuestion(text);
+      }
     },
     onError: (err) => console.warn("Azure STT error:", err),
   });
@@ -181,6 +287,11 @@ export default function Chat() {
       if (canSend) send();
     }
   };
+
+  const devStats =
+    debugInfo?.client_timings || metricsHistoryRef.current.length
+      ? computeLatencyStats(metricsHistoryRef.current)
+      : null;
 
   return (
     <div style={styles.page}>
@@ -312,15 +423,119 @@ export default function Chat() {
 
                 <div style={styles.debugSectionTitle}>Timings</div>
                 <div style={styles.debugLine}>
+                  Speech/Input capture (STT/Input to request):{" "}
+                  <code style={styles.debugInlineCode}>
+                    {fmtMs(debugInfo?.client_timings?.stt_to_request_ms)}
+                  </code>{" "}
+                  ms
+                </div>
+                <div style={styles.debugLine}>
+                  Query rewrite: <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.timings?.query_rewrite_ms)}</code>{" "}
+                  ms
+                </div>
+                <div style={styles.debugLine}>
                   Retrieval: <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.timings?.retrieval_ms)}</code> ms
                 </div>
                 <div style={styles.debugLine}>
-                  Generation:{" "}
-                  <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.timings?.generation_ms)}</code> ms
+                  Reranking/Fusion: <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.timings?.reranking_ms)}</code>{" "}
+                  ms
                 </div>
                 <div style={styles.debugLine}>
-                  Total: <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.timings?.total_ms)}</code> ms
+                  Prompt assembly: <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.timings?.prompt_assembly_ms)}</code>{" "}
+                  ms
                 </div>
+                <div style={styles.debugLine}>
+                  LLM generation (stream):{" "}
+                  <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.timings?.llm_generation_ms)}</code> ms
+                </div>
+                <div style={styles.debugLine}>
+                  Backend total: <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.timings?.backend_total_ms)}</code> ms
+                </div>
+                <div style={styles.debugLine}>
+                  Total response (to done):{" "}
+                  <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.client_timings?.total_to_done_ms)}</code> ms
+                </div>
+
+                <div style={styles.debugSectionTitle}>Streaming</div>
+                <div style={styles.debugLine}>
+                  Time to first token:{" "}
+                  <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.client_timings?.time_to_first_token_ms)}</code> ms
+                </div>
+                <div style={styles.debugLine}>
+                  Streaming duration:{" "}
+                  <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.client_timings?.streaming_ms)}</code> ms
+                </div>
+
+                <div style={styles.debugSectionTitle}>TTS / Avatar</div>
+                <div style={styles.debugLine}>
+                  TTS proxy (speak ack):{" "}
+                  <code style={styles.debugInlineCode}>{fmtMs(debugInfo?.client_timings?.tts_proxy_ms)}</code> ms
+                </div>
+                <div style={styles.debugLine}>
+                  Total response (to speak ack):{" "}
+                  <code style={styles.debugInlineCode}>
+                    {fmtMs(debugInfo?.client_timings?.total_to_speak_ms)}
+                  </code>{" "}
+                  ms
+                </div>
+
+                <div style={styles.debugSectionTitle}>Slow-path Detection</div>
+                {debugInfo?.client_timings?.slow_path?.is_slow ? (
+                  <div style={styles.debugLine}>
+                    Slow-path:{" "}
+                    <code style={styles.debugInlineCode}>YES</code>
+                    <span style={{ marginLeft: 8, opacity: 0.8 }}>
+                      {String(debugInfo?.client_timings?.slow_path?.reasons || []).slice(0, 140)}
+                    </span>
+                  </div>
+                ) : (
+                  <div style={styles.debugLine}>
+                    Slow-path: <code style={styles.debugInlineCode}>NO</code>
+                  </div>
+                )}
+
+                {devStats ? (
+                  <>
+                    <div style={styles.debugSectionTitle}>Latency Percentiles (dev)</div>
+                    <div style={styles.debugLine}>
+                      Total-to-Done p50/p95:{" "}
+                      <code style={styles.debugInlineCode}>
+                        {fmtMs(devStats?.total_to_done_ms?.p50)}
+                      </code>{" "}
+                      /{" "}
+                      <code style={styles.debugInlineCode}>
+                        {fmtMs(devStats?.total_to_done_ms?.p95)}
+                      </code>{" "}
+                      ms
+                    </div>
+                    <div style={styles.debugLine}>
+                      Total-to-Speak p50/p95:{" "}
+                      <code style={styles.debugInlineCode}>
+                        {fmtMs(devStats?.total_to_speak_ms?.p50)}
+                      </code>{" "}
+                      /{" "}
+                      <code style={styles.debugInlineCode}>
+                        {fmtMs(devStats?.total_to_speak_ms?.p95)}
+                      </code>{" "}
+                      ms
+                    </div>
+                    <div style={styles.debugLine}>
+                      TTFT p50/p95:{" "}
+                      <code style={styles.debugInlineCode}>{fmtMs(devStats?.time_to_first_token_ms?.p50)}</code> /{" "}
+                      <code style={styles.debugInlineCode}>{fmtMs(devStats?.time_to_first_token_ms?.p95)}</code> ms
+                    </div>
+                    <div style={styles.debugLine}>
+                      Retrieval p50/p95:{" "}
+                      <code style={styles.debugInlineCode}>{fmtMs(devStats?.retrieval_ms?.p50)}</code> /{" "}
+                      <code style={styles.debugInlineCode}>{fmtMs(devStats?.retrieval_ms?.p95)}</code> ms
+                    </div>
+                    <div style={styles.debugLine}>
+                      LLM generation p50/p95:{" "}
+                      <code style={styles.debugInlineCode}>{fmtMs(devStats?.llm_generation_ms?.p50)}</code> /{" "}
+                      <code style={styles.debugInlineCode}>{fmtMs(devStats?.llm_generation_ms?.p95)}</code> ms
+                    </div>
+                  </>
+                ) : null}
 
                 <div style={styles.debugSectionTitle}>Final Answer</div>
                 <pre style={styles.debugPre}>{truncate(String(debugInfo.final_answer ?? ""), 1200)}</pre>
@@ -572,4 +787,38 @@ function getFinalContextText(fc) {
   } catch {
     return String(fc);
   }
+}
+
+function percentile(values, p) {
+  if (!Array.isArray(values) || values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = (p / 100) * (sorted.length - 1);
+  const lower = Math.floor(idx);
+  const upper = Math.ceil(idx);
+  if (lower === upper) return sorted[lower];
+  const weight = idx - lower;
+  return sorted[lower] * (1 - weight) + sorted[upper] * weight;
+}
+
+function computeLatencyStats(history) {
+  if (!Array.isArray(history) || history.length < 3) return null;
+
+  const pull = (key) =>
+    history
+      .map((h) => h?.[key])
+      .filter((v) => typeof v === "number" && Number.isFinite(v));
+
+  const totalToDone = pull("total_to_done_ms");
+  const totalToSpeak = pull("total_to_speak_ms");
+  const ttft = pull("time_to_first_token_ms");
+  const retrieval = pull("retrieval_ms");
+  const llmGen = pull("llm_generation_ms");
+
+  return {
+    total_to_done_ms: { p50: percentile(totalToDone, 50), p95: percentile(totalToDone, 95) },
+    total_to_speak_ms: { p50: percentile(totalToSpeak, 50), p95: percentile(totalToSpeak, 95) },
+    time_to_first_token_ms: { p50: percentile(ttft, 50), p95: percentile(ttft, 95) },
+    retrieval_ms: { p50: percentile(retrieval, 50), p95: percentile(retrieval, 95) },
+    llm_generation_ms: { p50: percentile(llmGen, 50), p95: percentile(llmGen, 95) },
+  };
 }

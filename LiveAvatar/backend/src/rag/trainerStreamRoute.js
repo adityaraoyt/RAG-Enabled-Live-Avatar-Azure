@@ -167,8 +167,22 @@ trainerStreamRouter.post("/respond/stream", async (req, res) => {
   };
 
   const overallStartMs = nowMs();
-  const retrievalStartMs = overallStartMs;
+  let queryRewriteStartMs = null;
+  let retrievalStartMs = null;
+  let retrievalEndMs = null;
+  let rerankingStartMs = null;
+  let rerankingEndMs = null;
+  let promptAssemblyStartMs = null;
+  let promptAssemblyEndMs = null;
   let generationStartMs = null;
+  let generationEndMs = null;
+
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const diffMs = (start, end) => {
+    if (start === null || start === undefined) return null;
+    if (end === null || end === undefined) return null;
+    return round2(end - start);
+  };
 
   // Build retrieval query using recent history + current question
   const history = getHistory(conversationId, 8); // small window
@@ -200,6 +214,8 @@ const embedding = await embedText(retrievalQuery);
 
 
 
+  queryRewriteStartMs = nowMs();
+
 const r = await chatCompletion({
   system: rewriteSystem,
   user: `Conversation so far:\n${transcript}\n\nUser's last message:\n${question}\n\nRewritten standalone query:`,
@@ -230,6 +246,7 @@ const rewrittenQuery = rewriteFiltered ? question : (rewrittenQueryText || quest
     if (DEBUG_RAG) debug_info.search_query = retrievalQueries;
 
     // Embed + search each query, then fuse
+    retrievalStartMs = nowMs();
     const results = [];
     for (const q of retrievalQueries) {
       const emb = await embedText(q);
@@ -245,6 +262,7 @@ const rewrittenQuery = rewriteFiltered ? question : (rewrittenQueryText || quest
       }
       results.push(...hits);
     }
+    retrievalEndMs = nowMs();
 
     // Merge + dedupe + keep a reasonable cap
     const passages = dedupePassages(results).slice(0, topK * 3);
@@ -253,6 +271,7 @@ const rewrittenQuery = rewriteFiltered ? question : (rewrittenQueryText || quest
 
     // Build prompt with history
     
+    promptAssemblyStartMs = nowMs();
     const sys = systemPrompt() + "\nKeep it spoken and training-friendly.";
 
     // IMPORTANT: exclude the latest user msg in history because we add it explicitly
@@ -270,6 +289,8 @@ const rewrittenQuery = rewriteFiltered ? question : (rewrittenQueryText || quest
         content: userMsgContent,
       },
     ];
+
+    promptAssemblyEndMs = nowMs();
 
     if (DEBUG_RAG) debug_info.final_context = { system: sys, user: truncateDebugText(userMsgContent, 12000) };
 
@@ -297,12 +318,27 @@ const rewrittenQuery = rewriteFiltered ? question : (rewrittenQueryText || quest
     pushMsg(conversationId, { role: "assistant", content: full });
 
     if (DEBUG_RAG) {
-      const generationEndMs = nowMs();
       debug_info.final_answer = full;
+      generationEndMs = nowMs();
+
+      const queryRewriteMs = diffMs(queryRewriteStartMs, retrievalStartMs);
+      const retrievalMs = diffMs(retrievalStartMs, retrievalEndMs);
+      const rerankingMs = diffMs(rerankingStartMs, rerankingEndMs);
+      const promptAssemblyMs = diffMs(promptAssemblyStartMs, promptAssemblyEndMs);
+      const llmGenerationMs = diffMs(generationStartMs, generationEndMs);
+      const backendTotalMs = diffMs(overallStartMs, generationEndMs);
+
       debug_info.timings = {
-        retrieval_ms: Math.round((generationStartMs - retrievalStartMs) * 100) / 100,
-        generation_ms: Math.round((generationEndMs - generationStartMs) * 100) / 100,
-        total_ms: Math.round((generationEndMs - overallStartMs) * 100) / 100,
+        query_rewrite_ms: queryRewriteMs,
+        retrieval_ms: retrievalMs,
+        reranking_ms: rerankingMs,
+        prompt_assembly_ms: promptAssemblyMs,
+        llm_generation_ms: llmGenerationMs,
+        backend_total_ms: backendTotalMs,
+
+        // Back-compat keys (used by existing UI)
+        generation_ms: llmGenerationMs,
+        total_ms: backendTotalMs,
       };
     }
 
@@ -316,11 +352,25 @@ const rewrittenQuery = rewriteFiltered ? question : (rewrittenQueryText || quest
     pushMsg(conversationId, { role: "assistant", content: fallback });
     if (DEBUG_RAG) {
       debug_info.final_answer = fallback;
-      const endMs = nowMs();
+      generationEndMs = nowMs();
+
+      const queryRewriteMs = diffMs(queryRewriteStartMs, retrievalStartMs);
+      const retrievalMs = diffMs(retrievalStartMs, retrievalEndMs);
+      const rerankingMs = diffMs(rerankingStartMs, rerankingEndMs);
+      const promptAssemblyMs = diffMs(promptAssemblyStartMs, promptAssemblyEndMs);
+      const llmGenerationMs = diffMs(generationStartMs, generationEndMs);
+      const backendTotalMs = diffMs(overallStartMs, generationEndMs);
+
       debug_info.timings = {
-        retrieval_ms: generationStartMs ? Math.round((generationStartMs - retrievalStartMs) * 100) / 100 : 0,
-        generation_ms: generationStartMs ? Math.round((endMs - generationStartMs) * 100) / 100 : 0,
-        total_ms: Math.round((endMs - overallStartMs) * 100) / 100,
+        query_rewrite_ms: queryRewriteMs,
+        retrieval_ms: retrievalMs,
+        reranking_ms: rerankingMs,
+        prompt_assembly_ms: promptAssemblyMs,
+        llm_generation_ms: llmGenerationMs,
+        backend_total_ms: backendTotalMs,
+
+        generation_ms: llmGenerationMs,
+        total_ms: backendTotalMs,
       };
       send("done", { ok: true, filtered: true, debug: debug_info });
     } else {
@@ -377,7 +427,9 @@ trainerStreamRouter.post("/respond", async (req, res) => {
     }
 
     // Merge + dedupe + keep a reasonable cap
+    rerankingStartMs = nowMs();
     const passages = dedupePassages(results).slice(0, topK * 3);
+    rerankingEndMs = nowMs();
 
     if (DEBUG_RAG) debug_info.retrieved_chunks = passages.map(toDebugChunk);
 
