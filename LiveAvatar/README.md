@@ -313,19 +313,14 @@ python3 ingest_docs.py
 ## Known Gaps
 
 - No persistent database for chat history yet; conversations are in memory
-- Demo media placeholders are included, but a recorded walkthrough should still be captured from a live environment
 - Retrieval ranking is heuristic and can be improved with stronger fusion/reranking
 
 ## Roadmap
 
 - Persist chat history and session metadata
 - Add authentication and role-based access
-- Support richer citations and source previews in the UI
 - Add automated tests for RAG routes and speech/avatar integrations
 - Add background ingestion jobs and admin controls
 - Improve observability with request tracing and hosted dashboards
-- Ship a polished demo recording and production screenshots
 
-## License
 
-Add the license you want to publish with before the first public release.
